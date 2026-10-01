@@ -73,13 +73,37 @@ input.onAny = () => {
 };
 window.addEventListener("pointerdown", () => audio.unlock(), { passive: true });
 
-// Integer scaling so pixels stay crisp.
+// Integer scaling keeps pixels crisp on desktops. On phones an integer scale
+// often drops to 1x and wastes most of the screen, so fill the space instead.
+function safeInsets() {
+	const cs = getComputedStyle(document.documentElement);
+	const read = name => parseFloat(cs.getPropertyValue(name)) || 0;
+
+	return { t: read("--sat"), r: read("--sar"), b: read("--sab"), l: read("--sal") };
+}
+
 function resize() {
-	const vw = window.innerWidth;
-	const vh = window.innerHeight;
-	let scale = Math.floor(Math.min(vw / VIEW_W, vh / VIEW_H));
-	if (scale < 1) {
-		scale = Math.min(vw / VIEW_W, vh / VIEW_H); // tiny screens: fractional fallback
+	const vv = window.visualViewport;
+	const vw = vv ? vv.width : window.innerWidth;
+	const vh = vv ? vv.height : window.innerHeight;
+	const ins = safeInsets();
+	const touch = document.body.classList.contains("touch");
+	const portrait = touch && vh > vw;
+	document.body.classList.toggle("portrait", portrait);
+
+	let availW = vw - ins.l - ins.r;
+	let availH = vh - ins.t - ins.b;
+	if (portrait) {
+		availW -= 16; // side gutter
+		availH -= 48 + 220; // pause button row above, touch controls below
+	} else if (touch) {
+		availH -= 8;
+	}
+
+	const fit = Math.max(0.5, Math.min(availW / VIEW_W, availH / VIEW_H));
+	let scale = Math.floor(fit);
+	if (scale < 1 || (touch && (fit - scale) / fit > 0.12)) {
+		scale = fit;
 	}
 	const w = Math.floor(VIEW_W * scale);
 	const h = Math.floor(VIEW_H * scale);
@@ -91,6 +115,10 @@ function resize() {
 		renderer3d.resize(w, h);
 	}
 }
+if (window.visualViewport) {
+	window.visualViewport.addEventListener("resize", resize);
+}
+window.addEventListener("orientationchange", () => setTimeout(resize, 250));
 window.addEventListener("resize", resize);
 resize();
 

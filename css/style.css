@@ -1,4 +1,8 @@
 :root {
+	--sat: env(safe-area-inset-top, 0px);
+	--sar: env(safe-area-inset-right, 0px);
+	--sab: env(safe-area-inset-bottom, 0px);
+	--sal: env(safe-area-inset-left, 0px);
 	--bg: #14121c;
 	--btn: rgba(255, 255, 255, 0.1);
 	--btn-hi: rgba(255, 255, 255, 0.22);
@@ -35,6 +39,41 @@ body {
 	display: flex;
 	align-items: center;
 	justify-content: center;
+	padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+
+/* Phone held upright: game at the top, controls in their own band below. */
+body.portrait #stage {
+	align-items: flex-start;
+	padding-top: calc(env(safe-area-inset-top, 0px) + 48px);
+}
+
+/* Phone on its side: smaller, more see-through controls over the game edges. */
+@media (orientation: landscape) and (max-height: 500px) {
+	.pad.dpad {
+		grid-template-columns: 42px 42px 42px;
+		grid-template-rows: 42px 42px 42px;
+		gap: 4px;
+	}
+
+	.pad.actions {
+		grid-template-columns: 56px 60px;
+		grid-template-rows: 60px;
+		gap: 10px;
+	}
+
+	.pad.actions .run {
+		width: 56px;
+		height: 56px;
+	}
+
+	.pad.actions .jump {
+		margin-bottom: 20px;
+	}
+
+	.btn {
+		opacity: 0.75;
+	}
 }
 
 #screen {
