@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+	<title>Ember Hop</title>
+	<meta name="description" content="Ember Hop: a side-scrolling platformer about a fox finding her way home.">
+	<meta name="theme-color" content="#1c1c24">
+	<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+	<main id="stage">
+		<canvas id="game" width="320" height="192" aria-label="Ember Hop game"></canvas>
+	</main>
+	<div id="touch" aria-hidden="true">
+		<div class="pad left">
+			<button class="btn dir" data-action="left" aria-label="Left">&#9664;</button>
+			<button class="btn dir" data-action="right" aria-label="Right">&#9654;</button>
+			<button class="btn dir down" data-action="down" aria-label="Down">&#9660;</button>
+		</div>
+		<div class="pad right">
+			<button class="btn act run" data-action="run" aria-label="Run">B</button>
+			<button class="btn act jump" data-action="jump" aria-label="Jump">A</button>
+			<button class="btn small" data-action="pause" aria-label="Pause">II</button>
+		</div>
+	</div>
+	<noscript>Ember Hop needs JavaScript.</noscript>
+	<script type="module" src="js/main.js"></script>
+</body>
+</html>
