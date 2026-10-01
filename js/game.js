@@ -21,9 +21,9 @@ export const EMPTY_INPUT = Object.freeze({
 // Menu definitions. Sliders are adjusted with left/right.
 export const TITLE_MENU = [ "START", "LEVEL SELECT", "CONTROLS", "SETTINGS" ];
 export const PAUSE_MENU = [ "RESUME", "RESTART LEVEL", "MUSIC", "SOUND", "QUIT TO TITLE" ];
-export const SETTINGS_MENU = [ "MUSIC", "SOUND", "SCREEN SHAKE", "BACK" ];
+export const SETTINGS_MENU = [ "MUSIC", "SOUND", "SCREEN SHAKE", "VIEW", "BACK" ];
 export const GAMEOVER_MENU = [ "TRY AGAIN", "TITLE" ];
-export const DEFAULT_SETTINGS = Object.freeze({ music: 6, sfx: 8, shake: true });
+export const DEFAULT_SETTINGS = Object.freeze({ music: 6, sfx: 8, shake: true, view: "3d" });
 
 function makeRng(seed) {
 	return { s: seed >>> 0 };
@@ -52,6 +52,7 @@ export class Game {
 		settings.music = clamp(Math.round(settings.music), 0, 10);
 		settings.sfx = clamp(Math.round(settings.sfx), 0, 10);
 		settings.shake = Boolean(settings.shake);
+		settings.view = settings.view === "2d" ? "2d" : "3d";
 		this.state = {
 			screen: "title",
 			screenT: 0,
@@ -176,6 +177,8 @@ export class Game {
 		}
 		if (key === "shake") {
 			s.shake = !s.shake;
+		} else if (key === "view") {
+			s.view = s.view === "3d" ? "2d" : "3d";
 		} else {
 			const next = clamp(s[key] + dir, 0, 10);
 			if (next === s[key]) {
@@ -259,9 +262,9 @@ export class Game {
 			case "settings": {
 				this.moveCursor(this.navV(input), SETTINGS_MENU.length);
 				const h = this.navHoriz(input);
-				const key = [ "music", "sfx", "shake", null ][st.menu];
+				const key = [ "music", "sfx", "shake", "view", null ][st.menu];
 				if (key) {
-					this.adjustSetting(key, key === "shake" ? (h !== 0 || confirm ? 1 : 0) : h);
+					this.adjustSetting(key, key === "shake" || key === "view" ? (h !== 0 || confirm ? 1 : 0) : h);
 				}
 				if (((confirm && !key) || input.pauseP) && st.screenT > 4) {
 					this.emit("back");

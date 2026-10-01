@@ -2,6 +2,7 @@
 import { VIEW_W, VIEW_H, TITLE_MENU, PAUSE_MENU, SETTINGS_MENU, GAMEOVER_MENU } from "./game.js";
 import { TILE } from "./level.js";
 import { Sprites, tileImage, drawText, textWidth, logoImage, colorGlow, vignetteTexture } from "./sprites.js";
+import { HERO } from "./hero.js";
 
 const GOLD = "#f2c14e";
 const CREAM = "#fff3dc";
@@ -38,9 +39,17 @@ export class UI {
 		this.transT = 99;
 	}
 
+	// The 2D painter used for thumbnails (the 3D renderer wraps a 2D one).
+	get painter() {
+		return this.r.is3d ? this.r.r2d : this.r;
+	}
+
 	draw(game) {
 		const st = game.state;
 		this.tick++;
+		if (this.r.is3d) {
+			this.ctx.clearRect(0, 0, VIEW_W, VIEW_H);
+		}
 		if (st.screen !== this.lastScreen) {
 			this.prevScreen = this.lastScreen;
 			this.lastScreen = st.screen;
@@ -177,6 +186,25 @@ export class UI {
 		this.center(str, y, DIM);
 	}
 
+	// Round photo portrait (assets/hero-face.png) with a gold ring.
+	portrait(x, y, size) {
+		const ctx = this.ctx;
+		const img = HERO.face;
+		ctx.fillStyle = GOLD;
+		ctx.beginPath();
+		ctx.arc(x + size / 2, y + size / 2, size / 2 + 1, 0, Math.PI * 2);
+		ctx.fill();
+		ctx.save();
+		ctx.beginPath();
+		ctx.arc(x + size / 2, y + size / 2, size / 2, 0, Math.PI * 2);
+		ctx.clip();
+		const sq = Math.min(img.width, img.height);
+		ctx.imageSmoothingEnabled = true;
+		ctx.drawImage(img, (img.width - sq) / 2, (img.height - sq) / 2, sq, sq, x, y, size, size);
+		ctx.restore();
+		ctx.imageSmoothingEnabled = false;
+	}
+
 	// Ground strip used under title and ending scenes.
 	groundStrip(theme, offset, y = VIEW_H - 32) {
 		const ctx = this.ctx;
@@ -232,7 +260,16 @@ export class UI {
 		const ctx = this.ctx;
 		const st = game.state;
 		const scroll = this.tick * 0.9;
+		this.r.showcasePose = "walk";
 		this.r.drawScene("overworld", scroll, 12 * TILE);
+		if (!this.r.is3d) {
+			this.drawTitleActors(scroll);
+		}
+		this.drawTitleMenu(game);
+	}
+
+	drawTitleActors(scroll) {
+		const ctx = this.ctx;
 		this.groundStrip("overworld", scroll);
 		// Ember running along the meadow with a trail of dust
 		const frame = Math.floor(this.tick / 5) % 4;
@@ -256,7 +293,11 @@ export class UI {
 		}
 		// a Grumble trundling the other way
 		ctx.drawImage(Sprites.grumble(Math.floor(this.tick / 8)).l, 230, VIEW_H - 32 - 14);
+	}
 
+	drawTitleMenu(game) {
+		const ctx = this.ctx;
+		const st = game.state;
 		// Logo
 		const logo = logoImage();
 		const lx = Math.round((VIEW_W - logo.width) / 2);
@@ -285,6 +326,7 @@ export class UI {
 		const ctx = this.ctx;
 		const st = game.state;
 		const level = game.levels[st.selected];
+		this.r.showcasePose = "walk";
 		this.r.drawScene(level.theme, this.tick * 0.5 + st.selected * 300, 12 * TILE);
 		this.overlay(0.5);
 		this.center("LEVEL SELECT", 10, GOLD);
@@ -315,7 +357,7 @@ export class UI {
 			ctx.clip();
 			ctx.translate(x + 4, y + 4);
 			ctx.scale((cw - 8) / VIEW_W, 40 / VIEW_H);
-			this.r.drawScene(lv.theme, i * 400 + this.tick * (sel ? 0.6 : 0.15), 12 * TILE);
+			this.painter.drawScene(lv.theme, i * 400 + this.tick * (sel ? 0.6 : 0.15), 12 * TILE);
 			this.groundStrip(lv.theme, i * 400 + this.tick * (sel ? 0.6 : 0.15), VIEW_H - 32);
 			if (lv.theme === "underground" || lv.theme === "castle") {
 				this.ctx.drawImage(vignetteTexture(VIEW_W, VIEW_H, 0.5), 0, 0);
@@ -353,6 +395,7 @@ export class UI {
 
 	drawControls(game) {
 		const ctx = this.ctx;
+		this.r.showcasePose = "idle";
 		this.r.drawScene("dusk", this.tick * 0.4, 12 * TILE);
 		this.overlay(0.55);
 		const pw = 288;
@@ -403,13 +446,14 @@ export class UI {
 			this.r.drawWorld(game);
 			this.overlay(0.6);
 		} else {
+			this.r.showcasePose = "idle";
 			this.r.drawScene("underground", this.tick * 0.3, 12 * TILE);
 			this.overlay(0.35);
 		}
 		const pw = 200;
-		const ph = 78;
+		const ph = 94;
 		const px = (VIEW_W - pw) / 2;
-		const py = 52;
+		const py = 44;
 		this.panel(px, py, pw, ph, { title: "SETTINGS" });
 		const ys = this.menu(SETTINGS_MENU, px + 24, py + 14, 15, st.menu, { width: pw - 30 });
 		const s = st.settings;
@@ -419,6 +463,8 @@ export class UI {
 		if (this.r.reducedMotion) {
 			drawText(ctx, "(REDUCED MOTION)", px + 128, ys[2], DIM);
 		}
+		const viewLabel = s.view === "3d" ? (this.r.is3d ? "3D" : "3D (NO WEBGL)") : "2D CLASSIC";
+		drawText(ctx, viewLabel, px + 108, ys[3], st.menu === 3 ? GOLD : CREAM);
 		this.hint(this.touch ? "D-PAD ADJUST   A BACK" : "ARROWS ADJUST   Z OR ESC BACK", 156);
 	}
 
@@ -427,8 +473,11 @@ export class UI {
 		const s = game.session;
 		const level = game.level;
 		const st = game.state;
+		this.r.showcasePose = "idle";
 		this.r.drawScene(level.theme, st.screenT * 0.3 + s.levelIndex * 500, 12 * TILE);
-		this.groundStrip(level.theme, st.screenT * 0.3 + s.levelIndex * 500);
+		if (!this.r.is3d) {
+			this.groundStrip(level.theme, st.screenT * 0.3 + s.levelIndex * 500);
+		}
 		this.overlay(0.62);
 		this.ctx.drawImage(vignetteTexture(VIEW_W, VIEW_H, 0.5), 0, 0);
 		this.drawHud(game);
@@ -448,7 +497,11 @@ export class UI {
 		ctx.globalAlpha = 0.5;
 		ctx.drawImage(colorGlow("#ffd9a0", 64), fx - 8, fy - 4 + fox.height - 32, 32, 32);
 		ctx.globalAlpha = 1;
-		ctx.drawImage(fox, fx, fy);
+		if (HERO.face) {
+			this.portrait(fx - 2, py + 50, 20);
+		} else {
+			ctx.drawImage(fox, fx, fy);
+		}
 		drawText(ctx, `x ${s.lives}`, VIEW_W / 2 + 2, py + 66, WHITE, 1);
 		if (s.coins > 0 || s.score > 0) {
 			drawText(ctx, `${pad(s.score, 6)}`, VIEW_W / 2 + 2, py + 56, DIM);
@@ -471,7 +524,11 @@ export class UI {
 		ctx.fillRect(0, 0, VIEW_W, 26);
 
 		// portrait + lives
-		ctx.drawImage(Sprites.heroHead(s.power).r, 4, 5);
+		if (HERO.face) {
+			this.portrait(5, 4, 12);
+		} else {
+			ctx.drawImage(Sprites.heroHead(s.power).r, 4, 5);
+		}
 		drawText(ctx, `x${s.lives}`, 21, 7, WHITE);
 		// score
 		drawText(ctx, pad(s.score, 6), 44, 7, WHITE);
@@ -583,15 +640,18 @@ export class UI {
 	drawEnding(game) {
 		const ctx = this.ctx;
 		const st = game.state;
+		this.r.showcasePose = "idle";
 		this.r.drawScene("dusk", 120 + this.tick * 0.1, 12 * TILE);
-		this.groundStrip("dusk", 0);
-		this.r.drawCottage(VIEW_W / 2 + 28, VIEW_H - 32);
-		const fox = Sprites.hero(game.session.power, Math.floor(this.tick / 90) % 10 === 0 ? "blink" : "idle", 0).r;
-		ctx.globalAlpha = 0.5;
-		ctx.drawImage(colorGlow("#ffd9a0", 64), VIEW_W / 2 - 24, VIEW_H - 32 - fox.height - 10, 44, 44);
-		ctx.globalAlpha = 1;
-		ctx.drawImage(fox, VIEW_W / 2 - 2, VIEW_H - 32 - fox.height);
-		this.r.drawScarf({ vx: 0, facing: 1, ground: true }, VIEW_W / 2 - 2, VIEW_H - 32 - fox.height, fox.height, game.session.power);
+		if (!this.r.is3d) {
+			this.groundStrip("dusk", 0);
+			this.r.drawCottage(VIEW_W / 2 + 28, VIEW_H - 32);
+			const fox = Sprites.hero(game.session.power, Math.floor(this.tick / 90) % 10 === 0 ? "blink" : "idle", 0).r;
+			ctx.globalAlpha = 0.5;
+			ctx.drawImage(colorGlow("#ffd9a0", 64), VIEW_W / 2 - 24, VIEW_H - 32 - fox.height - 10, 44, 44);
+			ctx.globalAlpha = 1;
+			ctx.drawImage(fox, VIEW_W / 2 - 2, VIEW_H - 32 - fox.height);
+			this.r.drawScarf({ vx: 0, facing: 1, ground: true }, VIEW_W / 2 - 2, VIEW_H - 32 - fox.height, fox.height, game.session.power);
+		}
 		this.overlay(0.2);
 		this.center("EMBER MADE IT HOME!", 34, GOLD, 2);
 		this.center("BARON THORNBACK IS BEATEN", 62, CREAM);

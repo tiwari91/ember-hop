@@ -2,7 +2,9 @@
 import { Game, VIEW_W, VIEW_H, EMPTY_INPUT } from "./game.js";
 import { LEVELS } from "./levels/index.js";
 import { Renderer } from "./render.js";
+import { Renderer3D, webglAvailable } from "./render3d/renderer3d.js";
 import { UI } from "./ui.js";
+import { HERO, loadHeroFace } from "./hero.js";
 import { Input } from "./input.js";
 import { Audio } from "./audio.js";
 import { loadSave, writeSave } from "./storage.js";
@@ -11,14 +13,50 @@ const STEP = 1000 / 60;
 const MAX_STEPS = 5;
 
 const canvas = document.getElementById("game");
-const renderer = new Renderer(canvas);
-const ui = new UI(renderer);
+const glCanvas = document.getElementById("gl");
 const input = new Input(window);
 const audio = new Audio();
 const saved = loadSave();
 const game = new Game(LEVELS, saved);
 audio.setMuted(Boolean(saved.muted));
+
+// Renderers: the 3D view is the default; the 2D painter is the fallback and a setting.
+const renderer2d = new Renderer(canvas, { alpha: true });
+let renderer3d = null;
+const can3d = webglAvailable();
+function get3d() {
+	if (!renderer3d && can3d) {
+		try {
+			renderer3d = new Renderer3D(canvas, glCanvas, game.levels);
+			if (HERO.face) {
+				renderer3d.setFace(HERO.face);
+			}
+		} catch (err) {
+			console.warn("3D renderer unavailable, using 2D", err);
+			renderer3d = null;
+		}
+	}
+	return renderer3d;
+}
+const ui = new UI(renderer2d);
+function applyView() {
+	const want3d = game.state.settings.view === "3d";
+	const r3 = want3d ? get3d() : null;
+	ui.r = r3 || renderer2d;
+	ui.ctx = ui.r.ctx;
+	document.body.classList.toggle("view3d", Boolean(r3));
+	glCanvas.hidden = !r3;
+	if (r3) {
+		r3.resize(canvas.clientWidth, canvas.clientHeight);
+	}
+}
 applySettings();
+applyView();
+loadHeroFace((img) => {
+	if (renderer3d) {
+		renderer3d.setFace(img);
+	}
+});
 
 const touchRoot = document.getElementById("touch");
 input.bindTouch(touchRoot);
@@ -29,7 +67,10 @@ if (touchy) {
 	ui.touch = true;
 }
 
-input.onAny = () => audio.unlock();
+input.onAny = () => {
+	audio.unlock();
+	hold = false;
+};
 window.addEventListener("pointerdown", () => audio.unlock(), { passive: true });
 
 // Integer scaling so pixels stay crisp.
@@ -40,8 +81,15 @@ function resize() {
 	if (scale < 1) {
 		scale = Math.min(vw / VIEW_W, vh / VIEW_H); // tiny screens: fractional fallback
 	}
-	canvas.style.width = `${Math.floor(VIEW_W * scale)}px`;
-	canvas.style.height = `${Math.floor(VIEW_H * scale)}px`;
+	const w = Math.floor(VIEW_W * scale);
+	const h = Math.floor(VIEW_H * scale);
+	canvas.style.width = `${w}px`;
+	canvas.style.height = `${h}px`;
+	glCanvas.style.width = `${w}px`;
+	glCanvas.style.height = `${h}px`;
+	if (renderer3d) {
+		renderer3d.resize(w, h);
+	}
 }
 window.addEventListener("resize", resize);
 resize();
@@ -61,7 +109,14 @@ function save() {
 function applySettings() {
 	const s = game.state.settings;
 	audio.setVolumes(s.music / 10, s.sfx / 10);
+	if (typeof applyView === "function" && ui) {
+		applyView();
+	}
 }
+
+// Test hook support: after startLevel() the loop holds the simulation until a
+// replay or stepFrames() call (or real input) so the recorded inputs line up.
+let hold = false;
 
 // Hit-stop: a few frames of freeze on impactful hits. Purely presentational;
 // the simulation only ever sees the input sequence, so replays are unaffected.
@@ -91,7 +146,7 @@ function handleEvents() {
 				hitStop = Math.max(hitStop, 3);
 			} else if (ev === "bosshit" || ev === "bossdead") {
 				hitStop = Math.max(hitStop, 6);
-				renderer.flash = 3;
+				ui.r.flash = 3;
 			} else if (ev === "break") {
 				hitStop = Math.max(hitStop, 2);
 			}
@@ -124,11 +179,20 @@ function stepOnce(snap) {
 
 // Render timing for the performance check.
 const frameTimes = [];
-function recordFrame(ms) {
+const frameGaps = [];
+let lastFrameAt = 0;
+function recordFrame(ms, now) {
 	frameTimes.push(ms);
 	if (frameTimes.length > 240) {
 		frameTimes.shift();
 	}
+	if (lastFrameAt) {
+		frameGaps.push(now - lastFrameAt);
+		if (frameGaps.length > 240) {
+			frameGaps.shift();
+		}
+	}
+	lastFrameAt = now;
 }
 
 let last = performance.now();
@@ -168,6 +232,8 @@ function frame(now) {
 			replay.queue = null;
 		}
 		acc = 0;
+	} else if (hold) {
+		acc = 0;
 	} else if (hitStop > 0 && game.state.screen === "play") {
 		if (acc >= STEP) {
 			hitStop--;
@@ -188,7 +254,7 @@ function frame(now) {
 	}
 	const t0 = performance.now();
 	ui.draw(game);
-	recordFrame(performance.now() - t0);
+	recordFrame(performance.now() - t0, t0);
 }
 requestAnimationFrame(frame);
 
@@ -204,8 +270,10 @@ window.__game = {
 		game.startSession(i);
 		game.step({ ...EMPTY_INPUT, startP: true });
 		handleEvents();
+		hold = true;
 	},
 	replay(inputs, speed = 20, pauseAt = -1) {
+		hold = false;
 		replay.queue = inputs.slice();
 		replay.prev = 0;
 		replay.index = 0;
@@ -228,6 +296,7 @@ window.__game = {
 		return replay.last;
 	},
 	stepFrames(n, snap = EMPTY_INPUT) {
+		hold = false;
 		for (let i = 0; i < n; i++) {
 			const full = { ...EMPTY_INPUT, ...snap };
 			full.jumpP = Boolean(full.jump && !hookPrev.jump);
@@ -243,14 +312,32 @@ window.__game = {
 			return { avg: 0, max: 0, p95: 0, n: 0 };
 		}
 		const sorted = frameTimes.slice().sort((a, b) => a - b);
+		const gaps = frameGaps.length ? frameGaps.reduce((a, b) => a + b, 0) / frameGaps.length : 0;
 		return {
 			avg: frameTimes.reduce((a, b) => a + b, 0) / n,
 			max: sorted[n - 1],
 			p95: sorted[Math.floor(n * 0.95)],
+			fps: gaps ? 1000 / gaps : 0,
 			n,
 		};
 	},
 	resetFrameStats() {
 		frameTimes.length = 0;
+		frameGaps.length = 0;
+	},
+	view() {
+		return ui.r.is3d ? "3d" : "2d";
+	},
+	renderer3d() {
+		return renderer3d;
+	},
+	debugZoom(z) {
+		if (renderer3d) {
+			renderer3d.debugZoom = z;
+		}
+	},
+	setView(v) {
+		game.state.settings.view = v;
+		applyView();
 	},
 };

@@ -112,11 +112,12 @@ function cloud(ctx, x, y, s, color) {
 }
 
 export class Renderer {
-	constructor(canvas) {
+	constructor(canvas, opts = {}) {
 		this.canvas = canvas;
 		canvas.width = VIEW_W;
 		canvas.height = VIEW_H;
-		this.ctx = canvas.getContext("2d", { alpha: false });
+		this.ctx = canvas.getContext("2d", { alpha: Boolean(opts.alpha) });
+		this.is3d = false;
 		this.ctx.imageSmoothingEnabled = false;
 		this.reducedMotion = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 		this.tick = 0;

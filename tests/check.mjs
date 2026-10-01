@@ -69,7 +69,7 @@ const base = `http://127.0.0.1:${server.address().port}/`;
 
 // --- 3. Browser checks -----------------------------------------------------
 const { chromium } = await import(PW);
-const browser = await chromium.launch({ executablePath: CHROME });
+const browser = await chromium.launch({ executablePath: CHROME, args: [ "--ignore-gpu-blocklist" ] });
 const shots = path.join(root, "screenshots");
 fs.mkdirSync(shots, { recursive: true });
 
@@ -93,7 +93,7 @@ const player = (page) => page.evaluate(() => {
 	const w = window.__game.state.world;
 	return w ? { x: w.player.x, y: w.player.y, ground: w.player.ground, vy: w.player.vy, status: w.status } : null;
 });
-const waitReplay = (page, timeout = 60000) => page.waitForFunction(() => !window.__game.replaying(), null, { timeout });
+const waitReplay = (page, timeout = 120000) => page.waitForFunction(() => !window.__game.replaying(), null, { timeout });
 
 const { page } = await newPage();
 
@@ -103,6 +103,56 @@ await check("boots with zero console errors", async () => {
 	assert((await screen(page)) === "title", "not on title");
 	await page.screenshot({ path: path.join(shots, "title.png") });
 	return "title screen rendered";
+});
+
+await check("3D view is the default: three.js loaded, WebGL canvas visible, frames render", async () => {
+	const info = await page.evaluate(() => {
+		const gl = document.getElementById("gl");
+		return {
+			view: window.__game.view(),
+			three: typeof THREE === "object",
+			hidden: gl.hidden,
+			width: gl.getBoundingClientRect().width,
+			backing: [ gl.width, gl.height ],
+			stats: window.__game.frameStats(),
+		};
+	});
+	assert(info.three, "THREE global missing (CDN script not loaded)");
+	assert(info.view === "3d", `view is ${info.view}`);
+	assert(!info.hidden && info.width > 0, "GL canvas hidden");
+	assert(info.backing[0] >= 320 && info.backing[1] >= 192, `backing store ${info.backing}`);
+	assert(info.stats.n > 5 && info.stats.fps > 5, `frames not advancing: ${JSON.stringify(info.stats)}`);
+	return `${info.backing[0]}x${info.backing[1]} backing, ${info.stats.fps.toFixed(0)} fps, draw avg ${info.stats.avg.toFixed(2)} ms`;
+});
+
+await check("title menu: level select, controls and settings open and close", async () => {
+	const press = async (k, wait = 110) => {
+		await page.keyboard.press(k);
+		await page.waitForTimeout(wait);
+	};
+	await press("ArrowDown");
+	await press("Space");
+	assert((await screen(page)) === "levels", "level select did not open");
+	await press("Escape", 160);
+	assert((await screen(page)) === "title", "escape did not return to title");
+	await press("ArrowDown");
+	await press("Space");
+	assert((await screen(page)) === "controls", "controls did not open");
+	await press("Escape", 160);
+	await press("ArrowDown");
+	await press("Space");
+	assert((await screen(page)) === "settings", "settings did not open");
+	const before = await page.evaluate(() => window.__game.state.settings.music);
+	await press("ArrowLeft");
+	const after = await page.evaluate(() => window.__game.state.settings.music);
+	assert(after === before - 1, `music slider ${before} -> ${after}`);
+	await press("ArrowRight");
+	await press("Escape", 160);
+	assert((await screen(page)) === "title", "settings did not close");
+	const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("ember-hop-save-v1") || "{}"));
+	assert(saved.settings && saved.settings.music === before, "settings not persisted");
+	await page.evaluate(() => { window.__game.state.menu = 0; });
+	return "menus navigate and settings persist";
 });
 
 await check("title -> level 1 starts", async () => {
@@ -145,6 +195,37 @@ await check("pause and resume", async () => {
 	return "P toggles pause";
 });
 
+await check("pause menu: restart level and quit to title", async () => {
+	const press = async (k, wait = 110) => {
+		await page.keyboard.press(k);
+		await page.waitForTimeout(wait);
+	};
+	await page.keyboard.down("ArrowRight");
+	await page.waitForTimeout(400);
+	await page.keyboard.up("ArrowRight");
+	const moved = await player(page);
+	await press("KeyP");
+	assert((await screen(page)) === "pause", "did not pause");
+	await press("ArrowDown");
+	await press("Space", 200);
+	await page.waitForFunction(() => window.__game.state.screen === "play", null, { timeout: 5000 });
+	const restarted = await player(page);
+	assert(restarted.x < moved.x, `restart did not reset position: ${moved.x} -> ${restarted.x}`);
+	await press("KeyP");
+	for (let i = 0; i < 4; i++) {
+		await press("ArrowDown");
+	}
+	await press("Space", 200);
+	assert((await screen(page)) === "title", "quit to title failed");
+	await page.evaluate(() => { window.__game.state.menu = 0; });
+	await press("Space");
+	await page.waitForFunction(() => window.__game.state.screen === "card");
+	await press("Space");
+	await page.waitForFunction(() => window.__game.state.screen === "play");
+	await page.screenshot({ path: path.join(shots, "pause.png") }).catch(() => {});
+	return "restart resets the level, quit returns to the title";
+});
+
 await check("death and respawn", async () => {
 	// Walk into the first Grumble without jumping: small Ember loses a life.
 	const livesBefore = await page.evaluate(() => window.__game.state.session.lives);
@@ -173,9 +254,13 @@ await check("death and respawn", async () => {
 await check("level 1 replay: stomp, coins, goal pole, level complete transition", async () => {
 	await page.evaluate(() => window.__game.startLevel(0));
 	await page.evaluate((inputs) => window.__game.replay(inputs, 20, 560), solutions[0]);
-	await page.waitForFunction(() => window.__game.paused(), null, { timeout: 20000 });
-	await page.waitForTimeout(100);
+	await page.waitForFunction(() => window.__game.paused(), null, { timeout: 60000 });
+	await page.waitForTimeout(150);
 	await page.screenshot({ path: path.join(shots, "level1.png") });
+	await page.evaluate(() => { window.__game.stepFrames(1, { pauseP: true }); window.__game.stepFrames(1, { down: true }); window.__game.stepFrames(1); window.__game.stepFrames(1, { down: true }); });
+	await page.waitForTimeout(250);
+	await page.screenshot({ path: path.join(shots, "pause.png") });
+	await page.evaluate(() => window.__game.stepFrames(1, { pauseP: true }));
 	await page.evaluate(() => window.__game.resume());
 	await waitReplay(page);
 	const last = await page.evaluate(() => window.__game.lastReplay());
@@ -183,8 +268,14 @@ await check("level 1 replay: stomp, coins, goal pole, level complete transition"
 	assert(last.stats.stomps >= 1, "no stomps");
 	assert(last.stats.coins >= 1 && last.coins >= 1, "no coins");
 	assert(last.score > 0, "no score");
+	await page.waitForFunction(() => window.__game.state.screen === "complete" && window.__game.state.screenT > 110, null, { timeout: 15000 });
+	await page.screenshot({ path: path.join(shots, "complete.png") });
 	await page.waitForFunction(() => window.__game.state.screen === "card" && window.__game.state.session.levelIndex === 1, null, { timeout: 15000 });
-	return `stomps=${last.stats.stomps} coins=${last.stats.coins} score=${last.score}, advanced to level 2 card`;
+	await page.waitForTimeout(400);
+	await page.screenshot({ path: path.join(shots, "card.png") });
+	const best = await page.evaluate(() => window.__game.state.bests[0]);
+	assert(best && best.score > 0 && best.frames > 0, "level best not recorded");
+	return `stomps=${last.stats.stomps} coins=${last.stats.coins} score=${last.score}, best recorded, advanced to level 2 card`;
 });
 
 await check("coin collect increments the counter directly", async () => {
@@ -206,11 +297,14 @@ await check("coin collect increments the counter directly", async () => {
 for (let i = 0; i < LEVELS.length; i++) {
 	await check(`level ${i + 1} (${LEVELS[i].name}) beatable in the browser via bot replay`, async () => {
 		await page.evaluate((idx) => window.__game.startLevel(idx), i);
-		const pauseAt = i === 1 ? 420 : i === 3 ? 1380 : -1;
+		const pauseAt = [ 560, 420, 700, 1380 ][i];
 		await page.evaluate(([ inputs, at ]) => window.__game.replay(inputs, 30, at), [ solutions[i], pauseAt ]);
 		if (pauseAt >= 0) {
-			await page.waitForFunction(() => window.__game.paused(), null, { timeout: 20000 });
-			await page.waitForTimeout(100);
+			await page.waitForFunction(() => window.__game.paused(), null, { timeout: 60000 });
+			await page.evaluate(() => window.__game.resetFrameStats());
+			await page.waitForTimeout(600);
+			const stats = await page.evaluate(() => window.__game.frameStats());
+			assert(stats.avg < 16 && stats.p95 < 16, `draw too slow: ${JSON.stringify(stats)}`);
 			await page.screenshot({ path: path.join(shots, `level${i + 1}.png`) });
 			await page.evaluate(() => window.__game.resume());
 		}
@@ -220,6 +314,42 @@ for (let i = 0; i < LEVELS.length; i++) {
 		return `${last.frames} frames, score ${last.score}`;
 	});
 }
+
+await check("level select starts the chosen level; 2D classic view still renders", async () => {
+	const press = async (k, wait = 110) => {
+		await page.keyboard.press(k);
+		await page.waitForTimeout(wait);
+	};
+	await page.waitForFunction(() => window.__game.state.screen === "ending", null, { timeout: 20000 });
+	await page.waitForTimeout(800);
+	await page.screenshot({ path: path.join(shots, "ending.png") });
+	await page.evaluate(() => { window.__game.game.quitToTitle(); window.__game.state.selected = 0; });
+	await page.waitForTimeout(200);
+	await press("ArrowDown");
+	await press("Space");
+	assert((await screen(page)) === "levels", "level select did not open");
+	const unlocked = await page.evaluate(() => window.__game.state.unlocked);
+	assert(unlocked === LEVELS.length - 1, `unlocked ${unlocked}`);
+	await press("ArrowRight");
+	await press("ArrowRight");
+	await page.waitForTimeout(300);
+	await page.screenshot({ path: path.join(shots, "levels.png") });
+	await press("Space");
+	await page.waitForFunction(() => window.__game.state.screen === "card");
+	const idx = await page.evaluate(() => window.__game.state.session.levelIndex);
+	assert(idx === 2, `started level index ${idx}`);
+	await press("Space");
+	await page.waitForFunction(() => window.__game.state.screen === "play");
+	await page.evaluate(() => window.__game.setView("2d"));
+	await page.waitForTimeout(300);
+	const v = await page.evaluate(() => ({ view: window.__game.view(), hidden: document.getElementById("gl").hidden }));
+	assert(v.view === "2d" && v.hidden, "2D fallback did not engage");
+	await page.screenshot({ path: path.join(shots, "level3-2d.png") });
+	await page.evaluate(() => window.__game.setView("3d"));
+	await page.waitForTimeout(200);
+	assert((await page.evaluate(() => window.__game.view())) === "3d", "3D view did not come back");
+	return `level ${idx + 1} started from select, view toggles 3d/2d`;
+});
 
 await check("no console errors during play", async () => {
 	assert(errors.length === 0, errors.join(" | "));

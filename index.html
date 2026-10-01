@@ -10,7 +10,10 @@
 </head>
 <body>
 	<main id="stage">
-		<canvas id="game" width="320" height="192" aria-label="Ember Hop game"></canvas>
+		<div id="screen">
+			<canvas id="gl" width="320" height="192" aria-hidden="true" hidden></canvas>
+			<canvas id="game" width="320" height="192" aria-label="Ember Hop game"></canvas>
+		</div>
 	</main>
 	<div id="touch" aria-hidden="true">
 		<div class="pad dpad">
@@ -26,6 +29,7 @@
 		<button class="btn sys pause" data-action="pause" aria-label="Pause">&#10074;&#10074;</button>
 	</div>
 	<noscript>Ember Hop needs JavaScript.</noscript>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.147.0/three.min.js"></script>
 	<script type="module" src="js/main.js"></script>
 </body>
 </html>

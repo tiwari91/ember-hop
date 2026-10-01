@@ -37,14 +37,35 @@ body {
 	justify-content: center;
 }
 
-#game {
-	image-rendering: pixelated;
-	image-rendering: crisp-edges;
-	background: #000;
-	display: block;
+#screen {
+	position: relative;
+	display: grid;
 	max-width: 100%;
 	max-height: 100%;
 	box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 24px 60px rgba(0, 0, 0, 0.55);
+	background: #000;
+}
+
+#screen canvas {
+	grid-area: 1 / 1;
+	display: block;
+	max-width: 100%;
+	max-height: 100%;
+}
+
+#game {
+	image-rendering: pixelated;
+	image-rendering: crisp-edges;
+	position: relative;
+	z-index: 1;
+}
+
+#gl {
+	z-index: 0;
+}
+
+#gl[hidden] {
+	display: none;
 }
 
 #touch {
