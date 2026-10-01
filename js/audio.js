@@ -73,6 +73,8 @@ export class Audio {
 		this.muted = false;
 		this.music = null;
 		this.timer = null;
+		this.musicVol = 0.35;
+		this.sfxVol = 0.6;
 	}
 
 	// Must be called from a user gesture before anything can play.
@@ -92,13 +94,25 @@ export class Audio {
 		this.master.gain.value = this.muted ? 0 : 0.5;
 		this.master.connect(this.ctx.destination);
 		this.sfxGain = this.ctx.createGain();
-		this.sfxGain.gain.value = 0.6;
+		this.sfxGain.gain.value = this.sfxVol;
 		this.sfxGain.connect(this.master);
 		this.musicGain = this.ctx.createGain();
-		this.musicGain.gain.value = 0.35;
+		this.musicGain.gain.value = this.musicVol;
 		this.musicGain.connect(this.master);
 		if (this.pendingMusic) {
 			this.playMusic(this.pendingMusic);
+		}
+	}
+
+	// Volumes are 0..1 fractions from the settings menu.
+	setVolumes(music, sfx) {
+		this.musicVol = 0.35 * Math.max(0, Math.min(1, music));
+		this.sfxVol = 0.6 * Math.max(0, Math.min(1, sfx));
+		if (this.musicGain) {
+			this.musicGain.gain.value = this.musicVol;
+		}
+		if (this.sfxGain) {
+			this.sfxGain.gain.value = this.sfxVol;
 		}
 	}
 
@@ -235,7 +249,16 @@ export class Audio {
 				this.tone({ freq: 880, dur: 0.1, vol: 0.2, delay: 0.07 });
 				break;
 			case "select":
-				this.tone({ freq: 660, dur: 0.05, vol: 0.15 });
+			case "menu":
+				this.tone({ type: "triangle", freq: 740, dur: 0.04, vol: 0.18 });
+				break;
+			case "confirm":
+				this.tone({ freq: 660, dur: 0.06, vol: 0.2 });
+				this.tone({ freq: 990, dur: 0.12, vol: 0.2, delay: 0.05 });
+				break;
+			case "back":
+				this.tone({ freq: 660, dur: 0.06, vol: 0.18 });
+				this.tone({ freq: 440, dur: 0.12, vol: 0.18, delay: 0.05 });
 				break;
 			case "start":
 				[ 523, 659, 784 ].forEach((f, i) => this.tone({ freq: f, dur: 0.1, vol: 0.25, delay: i * 0.06 }));

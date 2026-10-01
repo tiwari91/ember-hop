@@ -18,6 +18,7 @@ const audio = new Audio();
 const saved = loadSave();
 const game = new Game(LEVELS, saved);
 audio.setMuted(Boolean(saved.muted));
+applySettings();
 
 const touchRoot = document.getElementById("touch");
 input.bindTouch(touchRoot);
@@ -35,8 +36,7 @@ window.addEventListener("pointerdown", () => audio.unlock(), { passive: true });
 function resize() {
 	const vw = window.innerWidth;
 	const vh = window.innerHeight;
-	const touchPad = document.body.classList.contains("touch") ? 0 : 0;
-	let scale = Math.floor(Math.min(vw / VIEW_W, (vh - touchPad) / VIEW_H));
+	let scale = Math.floor(Math.min(vw / VIEW_W, vh / VIEW_H));
 	if (scale < 1) {
 		scale = Math.min(vw / VIEW_W, vh / VIEW_H); // tiny screens: fractional fallback
 	}
@@ -48,19 +48,31 @@ resize();
 
 document.addEventListener("visibilitychange", () => {
 	if (document.hidden && game.state.screen === "play") {
+		game.state.menu = 0;
 		game.setScreen("pause");
 		audio.stopMusic();
 	}
 });
 
 function save() {
-	writeSave({ best: game.state.best, unlocked: game.state.unlocked, muted: game.state.muted });
+	writeSave(game.saveData());
 }
+
+function applySettings() {
+	const s = game.state.settings;
+	audio.setVolumes(s.music / 10, s.sfx / 10);
+}
+
+// Hit-stop: a few frames of freeze on impactful hits. Purely presentational;
+// the simulation only ever sees the input sequence, so replays are unaffected.
+let hitStop = 0;
 
 function handleEvents() {
 	for (const ev of game.drainEvents()) {
 		if (ev === "save") {
 			save();
+		} else if (ev === "settings") {
+			applySettings();
 		} else if (ev.startsWith("music:")) {
 			const name = ev.slice(6);
 			if (name === "stop") {
@@ -75,6 +87,14 @@ function handleEvents() {
 			audio.play(ev);
 			audio.playMusic(game.level.music);
 		} else {
+			if (ev === "stomp" || ev === "kick") {
+				hitStop = Math.max(hitStop, 3);
+			} else if (ev === "bosshit" || ev === "bossdead") {
+				hitStop = Math.max(hitStop, 6);
+				renderer.flash = 3;
+			} else if (ev === "break") {
+				hitStop = Math.max(hitStop, 2);
+			}
 			audio.play(ev);
 		}
 	}
@@ -102,6 +122,15 @@ function stepOnce(snap) {
 	handleEvents();
 }
 
+// Render timing for the performance check.
+const frameTimes = [];
+function recordFrame(ms) {
+	frameTimes.push(ms);
+	if (frameTimes.length > 240) {
+		frameTimes.shift();
+	}
+}
+
 let last = performance.now();
 let acc = 0;
 function frame(now) {
@@ -111,6 +140,7 @@ function frame(now) {
 	let steps = 0;
 	if (replay.queue) {
 		// Fast-forward through recorded inputs (used by tests/check.mjs).
+		hitStop = 0;
 		for (let i = 0; i < replay.speed && !replay.paused && replay.index < replay.queue.length; i++) {
 			if (replay.index === replay.pauseAt) {
 				replay.paused = true;
@@ -138,17 +168,27 @@ function frame(now) {
 			replay.queue = null;
 		}
 		acc = 0;
+	} else if (hitStop > 0 && game.state.screen === "play") {
+		if (acc >= STEP) {
+			hitStop--;
+			acc = Math.min(acc - STEP, STEP);
+		}
 	} else {
 		while (acc >= STEP && steps < MAX_STEPS) {
 			stepOnce(input.snapshot());
 			acc -= STEP;
 			steps++;
+			if (hitStop > 0) {
+				break;
+			}
 		}
 		if (steps === MAX_STEPS) {
 			acc = 0;
 		}
 	}
+	const t0 = performance.now();
 	ui.draw(game);
+	recordFrame(performance.now() - t0);
 }
 requestAnimationFrame(frame);
 
@@ -195,5 +235,22 @@ window.__game = {
 			hookPrev = full;
 			stepOnce(full);
 		}
+	},
+	// Render cost of recent frames in milliseconds.
+	frameStats() {
+		const n = frameTimes.length;
+		if (!n) {
+			return { avg: 0, max: 0, p95: 0, n: 0 };
+		}
+		const sorted = frameTimes.slice().sort((a, b) => a - b);
+		return {
+			avg: frameTimes.reduce((a, b) => a + b, 0) / n,
+			max: sorted[n - 1],
+			p95: sorted[Math.floor(n * 0.95)],
+			n,
+		};
+	},
+	resetFrameStats() {
+		frameTimes.length = 0;
 	},
 };

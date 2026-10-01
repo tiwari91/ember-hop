@@ -1,4 +1,4 @@
-// Ember, the hero. Movement, jumping, power states and sparks. Pure logic.
+// Ember, the heroine. Movement, jumping, power states and sparks. Pure logic.
 import { T, TILE, isPipeTop } from "./level.js";
 import { moveEntity, overlappedTiles } from "./physics.js";
 

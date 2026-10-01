@@ -11,11 +11,19 @@ export const VIEW_H = 192;
 export const START_LIVES = 3;
 const TIMER_FRAMES = 36; // one timer tick every 0.6 s
 const CARD_FRAMES = 110;
+const COMPLETE_FRAMES = 230;
 
 export const EMPTY_INPUT = Object.freeze({
 	left: false, right: false, up: false, down: false, jump: false, run: false,
 	jumpP: false, runP: false, pauseP: false, startP: false,
 });
+
+// Menu definitions. Sliders are adjusted with left/right.
+export const TITLE_MENU = [ "START", "LEVEL SELECT", "CONTROLS", "SETTINGS" ];
+export const PAUSE_MENU = [ "RESUME", "RESTART LEVEL", "MUSIC", "SOUND", "QUIT TO TITLE" ];
+export const SETTINGS_MENU = [ "MUSIC", "SOUND", "SCREEN SHAKE", "BACK" ];
+export const GAMEOVER_MENU = [ "TRY AGAIN", "TITLE" ];
+export const DEFAULT_SETTINGS = Object.freeze({ music: 6, sfx: 8, shake: true });
 
 function makeRng(seed) {
 	return { s: seed >>> 0 };
@@ -33,16 +41,31 @@ export function rand(rng) {
 	return x / 4294967296;
 }
 
+function clamp(v, lo, hi) {
+	return Math.max(lo, Math.min(hi, v));
+}
+
 export class Game {
 	constructor(levelDefs, saved = {}) {
 		this.levels = levelDefs.map(loadLevel);
+		const settings = { ...DEFAULT_SETTINGS, ...(saved.settings || {}) };
+		settings.music = clamp(Math.round(settings.music), 0, 10);
+		settings.sfx = clamp(Math.round(settings.sfx), 0, 10);
+		settings.shake = Boolean(settings.shake);
 		this.state = {
 			screen: "title",
 			screenT: 0,
 			selected: 0,
 			unlocked: Math.min(saved.unlocked || 0, this.levels.length - 1),
 			best: saved.best || 0,
+			// Per-level bests: { score, frames } or null.
+			bests: this.levels.map((_, i) => (Array.isArray(saved.bests) && saved.bests[i]) || null),
 			muted: Boolean(saved.muted),
+			settings,
+			menu: 0,
+			from: "title",
+			nav: 0,
+			navH: 0,
 			session: null,
 			world: null,
 			events: [],
@@ -76,6 +99,11 @@ export class Game {
 		return ev;
 	}
 
+	saveData() {
+		const st = this.state;
+		return { best: st.best, unlocked: st.unlocked, bests: st.bests, muted: st.muted, settings: st.settings };
+	}
+
 	startSession(levelIndex) {
 		this.state.session = {
 			lives: START_LIVES,
@@ -85,18 +113,24 @@ export class Game {
 			power: 0,
 			timeBonus: 0,
 			completed: false,
+			levelStartScore: 0,
+			levelScore: 0,
+			levelFrames: 0,
 		};
 		this.beginLevel();
 	}
 
 	beginLevel() {
 		this.state.world = null;
+		this.session.levelStartScore = this.session.score;
 		this.setScreen("card");
 	}
 
 	setScreen(name) {
 		this.state.screen = name;
 		this.state.screenT = 0;
+		this.state.nav = 0;
+		this.state.navH = 0;
 	}
 
 	spawnWorld() {
@@ -104,24 +138,139 @@ export class Game {
 		this.state.world = World.create(level, this.session.power, this.session.levelIndex);
 	}
 
+	// Vertical menu navigation with key repeat. Returns -1, 0 or 1.
+	navV(input) {
+		const st = this.state;
+		const dir = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+		if (dir === 0) {
+			st.nav = 0;
+			return 0;
+		}
+		st.nav++;
+		return st.nav === 1 || (st.nav > 18 && st.nav % 7 === 0) ? dir : 0;
+	}
+
+	navHoriz(input) {
+		const st = this.state;
+		const dir = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+		if (dir === 0) {
+			st.navH = 0;
+			return 0;
+		}
+		st.navH++;
+		return st.navH === 1 || (st.navH > 18 && st.navH % 6 === 0) ? dir : 0;
+	}
+
+	moveCursor(dir, len) {
+		const st = this.state;
+		if (dir !== 0) {
+			st.menu = (st.menu + dir + len) % len;
+			this.emit("menu");
+		}
+	}
+
+	adjustSetting(key, dir) {
+		const s = this.state.settings;
+		if (dir === 0) {
+			return;
+		}
+		if (key === "shake") {
+			s.shake = !s.shake;
+		} else {
+			const next = clamp(s[key] + dir, 0, 10);
+			if (next === s[key]) {
+				return;
+			}
+			s[key] = next;
+		}
+		this.emit("menu");
+		this.emit("settings");
+	}
+
+	openSettings(from) {
+		this.state.from = from;
+		this.state.menu = 0;
+		this.setScreen("settings");
+	}
+
+	quitToTitle() {
+		this.recordBest();
+		this.state.session = null;
+		this.state.world = null;
+		this.state.menu = 0;
+		this.setScreen("title");
+		this.emit("music:stop");
+	}
+
 	step(input) {
 		const st = this.state;
 		st.screenT++;
+		const confirm = input.startP || input.jumpP;
 		switch (st.screen) {
 			case "title":
-				if (input.left && st.screenT % 8 === 1) {
-					st.selected = Math.max(0, st.selected - 1);
-					this.emit("select");
-				}
-				if (input.right && st.screenT % 8 === 1) {
-					st.selected = Math.min(st.unlocked, st.selected + 1);
-					this.emit("select");
-				}
-				if (input.startP || input.jumpP) {
-					this.emit("start");
-					this.startSession(st.selected);
+				this.moveCursor(this.navV(input), TITLE_MENU.length);
+				if (confirm && st.screenT > 2) {
+					this.emit("confirm");
+					switch (st.menu) {
+						case 0:
+							st.selected = 0;
+							this.emit("start");
+							this.startSession(0);
+							break;
+						case 1:
+							this.setScreen("levels");
+							break;
+						case 2:
+							st.from = "title";
+							this.setScreen("controls");
+							break;
+						case 3:
+							this.openSettings("title");
+							break;
+					}
 				}
 				break;
+			case "levels": {
+				const h = this.navHoriz(input);
+				if (h !== 0) {
+					const next = clamp(st.selected + h, 0, st.unlocked);
+					if (next !== st.selected) {
+						st.selected = next;
+						this.emit("menu");
+					}
+				}
+				if (confirm && st.screenT > 4) {
+					this.emit("start");
+					this.startSession(st.selected);
+				} else if (input.pauseP) {
+					this.emit("back");
+					st.menu = 1;
+					this.setScreen("title");
+				}
+				break;
+			}
+			case "controls":
+				if ((confirm || input.pauseP) && st.screenT > 4) {
+					this.emit("back");
+					st.menu = st.from === "pause" ? 0 : 2;
+					this.setScreen(st.from);
+				}
+				break;
+			case "settings": {
+				this.moveCursor(this.navV(input), SETTINGS_MENU.length);
+				const h = this.navHoriz(input);
+				const key = [ "music", "sfx", "shake", null ][st.menu];
+				if (key) {
+					this.adjustSetting(key, key === "shake" ? (h !== 0 || confirm ? 1 : 0) : h);
+				}
+				if (((confirm && !key) || input.pauseP) && st.screenT > 4) {
+					this.emit("back");
+					this.emit("save");
+					st.menu = st.from === "pause" ? 0 : 3;
+					this.setScreen(st.from);
+				}
+				break;
+			}
 			case "card":
 				if (st.screenT >= CARD_FRAMES || input.startP || input.jumpP) {
 					this.spawnWorld();
@@ -131,6 +280,7 @@ export class Game {
 				break;
 			case "play": {
 				if (input.pauseP) {
+					st.menu = 0;
 					this.setScreen("pause");
 					this.emit("pause");
 					break;
@@ -141,41 +291,76 @@ export class Game {
 					this.onDeath();
 				} else if (world.s.status === "complete") {
 					this.session.power = world.s.player.power;
+					this.session.levelFrames = world.s.frame;
 					this.setScreen("complete");
 					this.emit("music:stop");
 				}
 				break;
 			}
-			case "pause":
-				if (input.pauseP || input.startP) {
+			case "pause": {
+				this.moveCursor(this.navV(input), PAUSE_MENU.length);
+				const h = this.navHoriz(input);
+				if (st.menu === 2) {
+					this.adjustSetting("music", h);
+				} else if (st.menu === 3) {
+					this.adjustSetting("sfx", h);
+				}
+				if (input.pauseP) {
 					this.setScreen("play");
 					this.emit("unpause");
+					break;
+				}
+				if (confirm && st.screenT > 4) {
+					switch (st.menu) {
+						case 0:
+							this.setScreen("play");
+							this.emit("unpause");
+							break;
+						case 1:
+							this.emit("confirm");
+							this.emit("music:stop");
+							this.beginLevel();
+							break;
+						case 4:
+							this.emit("confirm");
+							this.emit("save");
+							this.quitToTitle();
+							break;
+					}
 				}
 				break;
+			}
 			case "complete": {
 				const w = this.state.world;
-				if (w.timer > 0 && st.screenT > 40) {
+				if (w.timer > 0 && st.screenT > 70) {
 					const take = Math.min(w.timer, 3);
 					w.timer -= take;
 					this.session.score += take * 50;
 					if (st.screenT % 4 === 0) {
 						this.emit("tick");
 					}
-				} else if (st.screenT > 160) {
+				} else if (st.screenT > COMPLETE_FRAMES) {
 					this.nextLevel();
 				}
 				break;
 			}
 			case "gameover":
-				if (st.screenT > 60 && (input.startP || input.jumpP)) {
-					this.setScreen("title");
-				} else if (st.screenT > 420) {
-					this.setScreen("title");
+				this.moveCursor(this.navV(input), GAMEOVER_MENU.length);
+				if (st.screenT > 60 && confirm) {
+					this.emit("confirm");
+					if (st.menu === 0) {
+						const idx = this.session ? this.session.levelIndex : 0;
+						this.startSession(idx);
+					} else {
+						this.quitToTitle();
+					}
+				} else if (st.screenT > 900) {
+					this.quitToTitle();
 				}
 				break;
 			case "ending":
-				if (st.screenT > 60 && (input.startP || input.jumpP)) {
-					this.setScreen("title");
+				if (st.screenT > 60 && confirm) {
+					this.quitToTitle();
 				}
 				break;
 		}
@@ -188,6 +373,7 @@ export class Game {
 		this.emit("music:stop");
 		if (s.lives < 0) {
 			this.recordBest();
+			this.state.menu = 0;
 			this.setScreen("gameover");
 			this.emit("gameover");
 		} else {
@@ -197,11 +383,14 @@ export class Game {
 
 	nextLevel() {
 		const s = this.session;
-		const next = s.levelIndex + 1;
+		const idx = s.levelIndex;
+		const next = idx + 1;
+		s.levelScore = s.score - s.levelStartScore;
+		this.recordLevelBest(idx, s.levelScore, s.levelFrames);
 		if (next > this.state.unlocked) {
 			this.state.unlocked = Math.min(next, this.levels.length - 1);
-			this.emit("save");
 		}
+		this.emit("save");
 		if (next >= this.levels.length) {
 			s.completed = true;
 			this.recordBest();
@@ -211,6 +400,14 @@ export class Game {
 			s.levelIndex = next;
 			this.beginLevel();
 		}
+	}
+
+	recordLevelBest(idx, score, frames) {
+		const prev = this.state.bests[idx];
+		this.state.bests[idx] = {
+			score: Math.max(score, prev ? prev.score : 0),
+			frames: prev && prev.frames ? Math.min(frames, prev.frames) : frames,
+		};
 	}
 
 	recordBest() {
