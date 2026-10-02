@@ -46,34 +46,85 @@ export class Input {
 		});
 	}
 
-	// Wire on-screen buttons: elements with data-action inside `root`.
+	// Wire on-screen buttons: elements with data-action inside `root`. Each
+	// finger is tracked on its own and hit-tested as it moves, so sliding from
+	// one button to the next (left to right, or run onto jump) switches the
+	// action without lifting, the way a real d-pad rolls.
 	bindTouch(root) {
-		const buttons = root.querySelectorAll("[data-action]");
-		for (const btn of buttons) {
-			const action = btn.dataset.action;
-			const down = (e) => {
+		const buttons = Array.from(root.querySelectorAll("[data-action]"));
+		const fingers = new Map();
+		const refresh = () => {
+			const held = {};
+			for (const btn of fingers.values()) {
+				if (btn) {
+					held[btn.dataset.action] = true;
+				}
+			}
+			for (const btn of buttons) {
+				const a = btn.dataset.action;
+				const on = Boolean(held[a]);
+				if (on && !this.touch[a]) {
+					this.latch[a] = true;
+				}
+				this.touch[a] = on;
+				btn.classList.toggle("held", on);
+			}
+		};
+		const hit = (x, y) => {
+			const el = document.elementFromPoint(x, y);
+			return el && el.closest ? el.closest("[data-action]") : null;
+		};
+		const down = (e) => {
+			const btn = e.target.closest ? e.target.closest("[data-action]") : null;
+			if (!btn) {
+				return;
+			}
+			e.preventDefault();
+			if (btn.hasPointerCapture && btn.hasPointerCapture(e.pointerId)) {
+				btn.releasePointerCapture(e.pointerId);
+			}
+			this.hasTouch = true;
+			fingers.set(e.pointerId, btn);
+			refresh();
+			if (this.onAny) {
+				this.onAny();
+			}
+		};
+		const move = (e) => {
+			if (!fingers.has(e.pointerId)) {
+				return;
+			}
+			e.preventDefault();
+			const btn = hit(e.clientX, e.clientY);
+			if (btn !== fingers.get(e.pointerId)) {
+				fingers.set(e.pointerId, btn);
+				refresh();
+			}
+		};
+		const up = (e) => {
+			if (fingers.delete(e.pointerId)) {
 				e.preventDefault();
-				this.hasTouch = true;
-				this.touch[action] = true;
-				this.latch[action] = true;
-				btn.classList.add("down");
-				if (this.onAny) {
-					this.onAny();
-				}
-			};
-			const up = (e) => {
-				if (e) {
-					e.preventDefault();
-				}
-				this.touch[action] = false;
-				btn.classList.remove("down");
-			};
-			btn.addEventListener("pointerdown", down);
-			btn.addEventListener("pointerup", up);
-			btn.addEventListener("pointercancel", up);
-			btn.addEventListener("pointerleave", up);
-			btn.addEventListener("contextmenu", (e) => e.preventDefault());
-		}
+				refresh();
+			}
+		};
+		root.addEventListener("pointerdown", down);
+		window.addEventListener("pointermove", move, { passive: false });
+		window.addEventListener("pointerup", up);
+		window.addEventListener("pointercancel", up);
+		// Safari still scrolls, zooms or pops the magnifier off raw touches.
+		root.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+		root.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+		root.addEventListener("contextmenu", (e) => e.preventDefault());
+		window.addEventListener("blur", () => {
+			fingers.clear();
+			refresh();
+		});
+		document.addEventListener("visibilitychange", () => {
+			if (document.hidden) {
+				fingers.clear();
+				refresh();
+			}
+		});
 	}
 
 	pollGamepad() {

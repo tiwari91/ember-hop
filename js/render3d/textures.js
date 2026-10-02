@@ -15,6 +15,101 @@ function hash(a, b = 0) {
 	return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
+// Smooth value noise in [0, 1], tiling with period `p` so textures wrap.
+function vnoise(x, y, p, seed) {
+	const xi = Math.floor(x);
+	const yi = Math.floor(y);
+	const fx = x - xi;
+	const fy = y - yi;
+	const ux = fx * fx * (3 - 2 * fx);
+	const uy = fy * fy * (3 - 2 * fy);
+	const m = (v) => ((v % p) + p) % p;
+	const a = hash(m(xi) + seed * 131, m(yi));
+	const b = hash(m(xi + 1) + seed * 131, m(yi));
+	const c = hash(m(xi) + seed * 131, m(yi + 1));
+	const d = hash(m(xi + 1) + seed * 131, m(yi + 1));
+	return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+}
+
+// Fractal noise, tiling over a w x h texture at a base cell of `cell` pixels.
+function fbm(x, y, w, cell, seed, octaves = 4) {
+	let sum = 0;
+	let amp = 0.5;
+	let norm = 0;
+	let period = Math.max(1, Math.round(w / cell));
+	let scale = period / w;
+	for (let o = 0; o < octaves; o++) {
+		sum += amp * vnoise(x * scale, y * scale, period, seed + o * 17);
+		norm += amp;
+		amp *= 0.5;
+		period *= 2;
+		scale *= 2;
+	}
+	return sum / norm;
+}
+
+// Natural grain: multiply the painted texture by fractal noise so flat fills
+// read as stone, soil and wood rather than plastic.
+function grain(ctx, w, h, seed, amount = 0.16, cell = 32) {
+	const img = ctx.getImageData(0, 0, w, h);
+	const d = img.data;
+	for (let y = 0; y < h; y++) {
+		for (let x = 0; x < w; x++) {
+			const n = fbm(x, y % 128, w, cell, seed, 3);
+			const fine = hash(x + seed * 7, y) - 0.5;
+			const k = 1 + (n - 0.5) * 2 * amount + fine * amount * 0.35;
+			const i = (y * w + x) * 4;
+			d[i] = Math.min(255, d[i] * k);
+			d[i + 1] = Math.min(255, d[i + 1] * k);
+			d[i + 2] = Math.min(255, d[i + 2] * k);
+		}
+	}
+	ctx.putImageData(img, 0, 0);
+}
+
+// A height map for bump mapping, taken from the painted texture's brightness:
+// mortar, cracks and seams are darker, so they read as recessed.
+function heightFrom(src, seed) {
+	const w = src.width;
+	const h = src.height;
+	const c = canvas(w, h);
+	const ctx = c.getContext("2d");
+	const s = src.getContext("2d").getImageData(0, 0, w, h).data;
+	const img = ctx.createImageData(w, h);
+	const d = img.data;
+	for (let i = 0; i < w * h; i++) {
+		const l = (s[i * 4] * 0.3 + s[i * 4 + 1] * 0.55 + s[i * 4 + 2] * 0.15) / 255;
+		const x = i % w;
+		const y = Math.floor(i / w);
+		const v = Math.max(0, Math.min(255, (Math.sqrt(l) * 0.8 + (hash(x + seed, y * 3) - 0.5) * 0.12 + 0.1) * 255));
+		d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v;
+		d[i * 4 + 3] = 255;
+	}
+	ctx.putImageData(img, 0, 0);
+	return c;
+}
+
+// Radial alpha falloff written pixel by pixel. Canvas gradients are dithered
+// by Core Graphics on Apple devices, and once WebGL un-premultiplies the
+// near-transparent edge that dither turns into coloured speckles.
+function radialAlpha(size, falloff) {
+	const c = canvas(size, size);
+	const ctx = c.getContext("2d");
+	const img = ctx.createImageData(size, size);
+	const d = img.data;
+	const r = size / 2;
+	for (let y = 0; y < size; y++) {
+		for (let x = 0; x < size; x++) {
+			const dist = Math.hypot(x + 0.5 - r, y + 0.5 - r) / r;
+			const i = (y * size + x) * 4;
+			d[i] = d[i + 1] = d[i + 2] = 255;
+			d[i + 3] = Math.round(255 * Math.max(0, Math.min(1, falloff(Math.min(1, dist)))));
+		}
+	}
+	ctx.putImageData(img, 0, 0);
+	return c;
+}
+
 function speckle(ctx, w, h, n, colors, seed, size = 2) {
 	for (let i = 0; i < n; i++) {
 		ctx.fillStyle = colors[i % colors.length];
@@ -48,24 +143,43 @@ function tex(key, make) {
 	return cache.get(key);
 }
 
-// A block atlas: three 64x64 squares stacked (top, side, bottom).
-function atlas(key, drawTop, drawSide, drawBottom) {
-	return tex(key, () => {
-		const c = canvas(64, 192);
-		const ctx = c.getContext("2d");
+// A block atlas: three squares stacked (top, side, bottom). Painted in 64-unit
+// coordinates at 2x, then grained; a matching bump map rides along on
+// `texture.userData.bump`.
+function atlas(key, drawTop, drawSide, drawBottom, rough = 0.16) {
+	if (cache.has(key)) {
+		return cache.get(key);
+	}
+	const S = 128;
+	const c = canvas(S, S * 3);
+	const ctx = c.getContext("2d");
+	const parts = [ drawTop, drawSide, drawBottom || drawSide ];
+	parts.forEach((draw, i) => {
 		ctx.save();
-		drawTop(ctx, 64, 64);
+		ctx.translate(0, i * S);
+		ctx.beginPath();
+		ctx.rect(0, 0, 64 * (S / 64), S);
+		ctx.clip();
+		ctx.scale(S / 64, S / 64);
+		draw(ctx, 64, 64);
 		ctx.restore();
-		ctx.save();
-		ctx.translate(0, 64);
-		drawSide(ctx, 64, 64);
-		ctx.restore();
-		ctx.save();
-		ctx.translate(0, 128);
-		(drawBottom || drawSide)(ctx, 64, 64);
-		ctx.restore();
-		return c;
 	});
+	if (rough > 0) {
+		grain(ctx, S, S * 3, key.length * 13 + key.charCodeAt(0), rough, 40);
+	}
+	const t = tex(key, () => c);
+	const b = new THREE.CanvasTexture(heightFrom(c, key.length));
+	b.wrapS = b.wrapT = THREE.RepeatWrapping;
+	b.anisotropy = 4;
+	t.userData.bump = b;
+	return t;
+}
+
+// Darken (k < 1) or lighten (k > 1) a #rrggbb colour.
+function shade(hex, k) {
+	const n = parseInt(hex.slice(1), 16);
+	const ch = (v) => Math.max(0, Math.min(255, Math.round(v * k)));
+	return `rgb(${ch(n >> 16)},${ch((n >> 8) & 255)},${ch(n & 255)})`;
 }
 
 function fill(ctx, w, h, color) {
@@ -86,9 +200,23 @@ export const Textures = {
 		const [ base, light, dark ] = th.ground;
 		const [ g0, g1, g2 ] = th.grass;
 		return atlas(`grass-${g1}`, (ctx, w, h) => {
-			gradient(ctx, w, h, g2, g1);
-			speckle(ctx, w, h, 90, [ g0, g2, "#ffffff" ], 11, 3);
-			bevel(ctx, w, h, "#ffffff", g0, 3);
+			// Lit from straight above by the sun, so paint it a shade deeper than the 2D palette.
+			gradient(ctx, w, h, g0, shade(g0, 0.72));
+			speckle(ctx, w, h, 160, [ shade(g0, 0.6), g1, shade(g1, 0.8) ], 11, 2);
+			// blades: short darker and lighter strokes
+			for (let i = 0; i < 70; i++) {
+				const x = hash(i, 31) * w;
+				const y = hash(i, 32) * h;
+				ctx.strokeStyle = i % 3 ? shade(g0, 0.55) : g1;
+				ctx.globalAlpha = 0.45;
+				ctx.lineWidth = 0.8;
+				ctx.beginPath();
+				ctx.moveTo(x, y);
+				ctx.lineTo(x + (hash(i, 33) - 0.5) * 3, y - 2 - hash(i, 34) * 3);
+				ctx.stroke();
+			}
+			ctx.globalAlpha = 1;
+			bevel(ctx, w, h, g1, shade(g0, 0.5), 3);
 		}, (ctx, w, h) => {
 			gradient(ctx, w, h, base, dark);
 			// grass lip hanging over the top edge of the side faces
@@ -295,35 +423,45 @@ export const Textures = {
 	},
 	// Round soft glow for sprites.
 	glow() {
-		return tex("glow", () => {
-			const c = canvas(64, 64);
-			const ctx = c.getContext("2d");
-			const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
-			g.addColorStop(0, "rgba(255,255,255,1)");
-			g.addColorStop(0.3, "rgba(255,255,255,0.6)");
-			g.addColorStop(1, "rgba(255,255,255,0)");
-			ctx.fillStyle = g;
-			ctx.fillRect(0, 0, 64, 64);
-			return c;
-		});
+		return tex("glow", () => radialAlpha(64, (d) => (d < 0.3 ? 1 - (d / 0.3) * 0.4 : 0.6 * Math.pow(1 - (d - 0.3) / 0.7, 1.6))));
 	},
-	// Fluffy cloud sprite.
+	// Soft, lumpy cumulus: a sum of round puffs written as alpha, lit from above
+	// with a cooler, darker base.
 	cloud() {
 		return tex("cloud", () => {
-			const c = canvas(128, 64);
+			const W = 256;
+			const H = 128;
+			const c = canvas(W, H);
 			const ctx = c.getContext("2d");
-			ctx.fillStyle = "#ffffff";
-			for (const [ x, y, r ] of [ [ 30, 40, 18 ], [ 55, 30, 24 ], [ 85, 36, 20 ], [ 105, 44, 14 ], [ 60, 46, 20 ] ]) {
-				ctx.beginPath();
-				ctx.arc(x, y, r, 0, Math.PI * 2);
-				ctx.fill();
+			const img = ctx.createImageData(W, H);
+			const d = img.data;
+			const puffs = [];
+			for (let i = 0; i < 14; i++) {
+				const t = i / 13;
+				puffs.push([ 40 + t * 176 + (hash(i, 41) - 0.5) * 20, 74 - Math.sin(t * Math.PI) * 26 + (hash(i, 42) - 0.5) * 14, 20 + Math.sin(t * Math.PI) * 18 + hash(i, 43) * 10 ]);
 			}
-			ctx.globalCompositeOperation = "source-atop";
-			const g = ctx.createLinearGradient(0, 10, 0, 64);
-			g.addColorStop(0, "rgba(255,255,255,0)");
-			g.addColorStop(1, "rgba(180,200,230,0.6)");
-			ctx.fillStyle = g;
-			ctx.fillRect(0, 0, 128, 64);
+			for (let y = 0; y < H; y++) {
+				for (let x = 0; x < W; x++) {
+					let a = 0;
+					for (const [ px, py, pr ] of puffs) {
+						const q = ((x - px) * (x - px) + (y - py) * (y - py)) / (pr * pr);
+						if (q < 1) {
+							a += (1 - q) * (1 - q);
+						}
+					}
+					// flat-ish bottom, wispy noise at the edges
+					const base = Math.max(0, Math.min(1, (96 - y) / 12));
+					const n = 0.75 + fbm(x, y, W, 24, 9, 3) * 0.5;
+					a = Math.min(1, a * 1.6 * n) * base;
+					const shade = 1 - Math.max(0, Math.min(1, (y - 40) / 60)) * 0.32;
+					const i = (y * W + x) * 4;
+					d[i] = Math.round(255 * shade * 0.97);
+					d[i + 1] = Math.round(255 * shade * 0.985);
+					d[i + 2] = Math.round(255 * Math.min(1, shade * 1.02 + 0.02));
+					d[i + 3] = Math.round(255 * Math.max(0, Math.min(1, a)));
+				}
+			}
+			ctx.putImageData(img, 0, 0);
 			return c;
 		});
 	},

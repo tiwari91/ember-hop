@@ -30,13 +30,83 @@ function hash(a, b = 0) {
 	return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
+// Backdrop meshes share two vertex-coloured materials.
+let mountainMat = null;
+let hillMat = null;
+function MOUNTAIN_MAT() {
+	mountainMat = mountainMat || new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1 });
+	return mountainMat;
+}
+function HILL_MAT() {
+	hillMat = hillMat || new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1 });
+	return hillMat;
+}
+
+// A mountain: a cone whose rings are pushed in and out by noise, so the
+// silhouette breaks into ridges, coloured darker at the foot, with rock
+// strata and (optionally) snow above a jagged line. Base at y = 0.
+function mountainGeometry(r, h, seed, color, snow) {
+	const g = new THREE.ConeGeometry(r, h, 18, 7, true);
+	g.translate(0, h / 2, 0);
+	const pos = g.attributes.position;
+	const base = new THREE.Color(color).multiplyScalar(0.8);
+	const dark = base.clone().multiplyScalar(0.5);
+	const snowC = snow ? new THREE.Color(snow) : null;
+	const c = new THREE.Color();
+	const colors = [];
+	for (let i = 0; i < pos.count; i++) {
+		const x = pos.getX(i);
+		const y = pos.getY(i);
+		const z = pos.getZ(i);
+		const t = y / h;
+		const ang = Math.atan2(z, x);
+		const ridge = 1 + (hash(Math.round(ang * 3) + seed * 17, Math.round(t * 7)) - 0.5) * 0.35 * (1 - t);
+		if (t < 0.999) {
+			pos.setX(i, x * ridge);
+			pos.setZ(i, z * ridge);
+			pos.setY(i, y + (hash(Math.round(ang * 5) + seed, Math.round(t * 9) + 3) - 0.5) * h * 0.05 * (1 - t));
+		}
+		const strata = 0.92 + hash(Math.round(t * 14) + seed * 5, 7) * 0.16;
+		c.copy(dark).lerp(base, Math.min(1, t * 1.6)).multiplyScalar(strata);
+		const line = 0.8 + (hash(Math.round(ang * 4) + seed * 3, 11) - 0.5) * 0.12;
+		if (snowC && t > line) {
+			c.copy(snowC).multiplyScalar(0.94 + hash(i, seed) * 0.06);
+		}
+		colors.push(c.r, c.g, c.b);
+	}
+	g.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+	g.computeVertexNormals();
+	return g;
+}
+
+// A hill: a unit sphere with mottled grass and a darker, shadowed base.
+function hillGeometry(color, seed) {
+	const g = new THREE.SphereGeometry(1, 24, 14);
+	const pos = g.attributes.position;
+	const base = new THREE.Color(color).multiplyScalar(0.78);
+	const c = new THREE.Color();
+	const colors = [];
+	for (let i = 0; i < pos.count; i++) {
+		const x = pos.getX(i);
+		const y = pos.getY(i);
+		const patch = hash(Math.round(x * 6) + seed * 7, Math.round(y * 6)) * 0.14 + 0.93;
+		const ao = 0.62 + 0.38 * Math.min(1, Math.max(0, y + 0.15) * 1.6);
+		c.copy(base).multiplyScalar(patch * ao);
+		colors.push(c.r, c.g, c.b);
+	}
+	g.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+	return g;
+}
+
 const THEME_LEVEL = { overworld: 0, underground: 1, dusk: 2, castle: 3 };
 
+// hemi/env: sky fill (the env dome is image-based light, scaled by `env`);
+// sun: key light that casts the shadows; rim: cool back light for silhouettes.
 const LIGHTING = {
-	overworld: { hemiSky: 0xbfe3ff, hemiGround: 0x4a7a30, hemi: 0.55, sun: 0xfff1d6, sunI: 1.15, rim: 0x8ab8ff, rimI: 0.45, fog: 0xb9e3fb, fogNear: 700, fogFar: 1900, exposure: 1.0, dark: false },
-	dusk: { hemiSky: 0x8a4e8a, hemiGround: 0x3a2a4a, hemi: 0.55, sun: 0xffb070, sunI: 1.0, rim: 0x7a6aff, rimI: 0.55, fog: 0xd87a62, fogNear: 600, fogFar: 1700, exposure: 1.0, dark: false },
-	underground: { hemiSky: 0x3a5a9a, hemiGround: 0x0a1020, hemi: 0.5, sun: 0x7aa0e0, sunI: 0.45, rim: 0x6ff0ff, rimI: 0.35, fog: 0x070b16, fogNear: 180, fogFar: 760, exposure: 1.0, dark: true },
-	castle: { hemiSky: 0x6a4a5a, hemiGround: 0x1a0a10, hemi: 0.46, sun: 0xffb080, sunI: 0.5, rim: 0xff7a40, rimI: 0.45, fog: 0x14080c, fogNear: 200, fogFar: 820, exposure: 1.0, dark: true },
+	overworld: { hemiSky: 0xbfe3ff, hemiGround: 0x4a7a30, hemi: 0.18, env: 0.55, sun: 0xfff1d6, sunI: 1.3, rim: 0x8ab8ff, rimI: 0.4, fog: 0xb9e3fb, fogNear: 700, fogFar: 1900, exposure: 0.92, dark: false },
+	dusk: { hemiSky: 0x8a4e8a, hemiGround: 0x3a2a4a, hemi: 0.22, env: 0.5, sun: 0xffb070, sunI: 1.2, rim: 0x7a6aff, rimI: 0.5, fog: 0xd87a62, fogNear: 600, fogFar: 1700, exposure: 0.95, dark: false },
+	underground: { hemiSky: 0x3a5a9a, hemiGround: 0x0a1020, hemi: 0.3, env: 0.35, sun: 0x7aa0e0, sunI: 0.4, rim: 0x6ff0ff, rimI: 0.35, fog: 0x070b16, fogNear: 180, fogFar: 760, exposure: 1.0, dark: true },
+	castle: { hemiSky: 0x6a4a5a, hemiGround: 0x1a0a10, hemi: 0.3, env: 0.35, sun: 0xffb080, sunI: 0.45, rim: 0xff7a40, rimI: 0.45, fog: 0x14080c, fogNear: 200, fogFar: 820, exposure: 1.0, dark: true },
 };
 
 export class Renderer3D {
@@ -97,7 +167,28 @@ export class Renderer3D {
 		this.amb = [];
 		this.dust = [];
 		this.showcase = null;
-		this.lastSize = { w: 0, h: 0 };
+		this.lastSize = { w: 0, h: 0, dpr: 0 };
+		this.contextLost = false;
+
+		// iOS drops WebGL contexts under memory pressure or after the tab sits in
+		// the background. three.js re-creates its GPU state on restore; we also
+		// rebuild the room and re-apply the size so nothing is left stale.
+		glCanvas.addEventListener("webglcontextlost", (e) => {
+			e.preventDefault();
+			this.contextLost = true;
+		}, false);
+		glCanvas.addEventListener("webglcontextrestored", () => {
+			this.contextLost = false;
+			this.envCache = {};
+			this.pmrem = null;
+			this.built = { key: null, checksum: -1, theme: null };
+			this.gl.shadowMap.needsUpdate = true;
+			const { w, h } = this.lastSize;
+			this.lastSize = { w: 0, h: 0, dpr: 0 };
+			if (w && h) {
+				this.resize(w, h);
+			}
+		}, false);
 	}
 
 	// --- interface shared with the 2D renderer -----------------------------
@@ -127,12 +218,15 @@ export class Renderer3D {
 	}
 
 	resize(cssW, cssH) {
-		if (cssW === this.lastSize.w && cssH === this.lastSize.h) {
+		// Cap the backing store: crisp on phones and laptops, kind to weak GPUs.
+		// At most 2x, at most 1920 px wide and about 2.1 M pixels in all, well
+		// inside iOS's canvas and texture limits.
+		const area = Math.max(1, cssW * cssH);
+		const dpr = Math.min(2, window.devicePixelRatio || 1, 1920 / Math.max(1, cssW), Math.sqrt(2.1e6 / area));
+		if (cssW === this.lastSize.w && cssH === this.lastSize.h && dpr === this.lastSize.dpr) {
 			return;
 		}
-		this.lastSize = { w: cssW, h: cssH };
-		// Cap the backing store: crisp on phones and laptops, kind to weak GPUs.
-		const dpr = Math.min(2, window.devicePixelRatio || 1, 1920 / Math.max(1, cssW));
+		this.lastSize = { w: cssW, h: cssH, dpr };
 		this.gl.setPixelRatio(dpr);
 		this.gl.setSize(cssW, cssH, false);
 	}
@@ -267,9 +361,55 @@ export class Renderer3D {
 		this.buildTiles(theme, room, tiles);
 	}
 
+	// Image-based light: a tiny gradient sky/ground dome per theme, prefiltered
+	// once, so every surface picks up soft sky fill from above, bounce from
+	// below and believable highlights on metal and glossy blocks.
+	envFor(theme, L) {
+		this.envCache = this.envCache || {};
+		if (this.envCache[theme]) {
+			return this.envCache[theme];
+		}
+		const scene = new THREE.Scene();
+		const geo = new THREE.SphereGeometry(100, 32, 16);
+		const top = new THREE.Color(L.hemiSky);
+		const horizon = new THREE.Color(L.fog);
+		const ground = new THREE.Color(L.hemiGround);
+		const sun = new THREE.Color(L.sun);
+		const pos = geo.attributes.position;
+		const colors = [];
+		const c = new THREE.Color();
+		const sunDir = new THREE.Vector3(0.45, 0.75, 0.5).normalize();
+		const v = new THREE.Vector3();
+		for (let i = 0; i < pos.count; i++) {
+			v.fromBufferAttribute(pos, i).normalize();
+			if (v.y >= 0) {
+				c.copy(horizon).lerp(top, Math.pow(v.y, 0.6));
+			} else {
+				c.copy(horizon).lerp(ground, Math.min(1, -v.y * 3));
+			}
+			const glint = Math.pow(Math.max(0, v.dot(sunDir)), 24) * (L.dark ? 0.6 : 2.5);
+			c.r += sun.r * glint;
+			c.g += sun.g * glint;
+			c.b += sun.b * glint;
+			colors.push(c.r * L.env, c.g * L.env, c.b * L.env);
+		}
+		geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+		scene.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide })));
+		this.pmrem = this.pmrem || new THREE.PMREMGenerator(this.gl);
+		const rt = this.pmrem.fromScene(scene, 0.02);
+		geo.dispose();
+		this.envCache[theme] = rt.texture;
+		return rt.texture;
+	}
+
 	applyLighting(theme) {
 		const L = LIGHTING[theme] || LIGHTING.overworld;
 		const th = THEMES[theme] || THEMES.overworld;
+		try {
+			this.scene.environment = this.envFor(theme, L);
+		} catch (err) {
+			this.scene.environment = null;
+		}
 		this.hemi.color.set(L.hemiSky);
 		this.hemi.groundColor.set(L.hemiGround);
 		this.hemi.intensity = L.hemi;
@@ -332,32 +472,24 @@ export class Renderer3D {
 				geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
 				this.stars = add(new THREE.Points(geo, new THREE.PointsMaterial({ color: 0xffe9c0, size: 5, sizeAttenuation: true, transparent: true, opacity: 0.9, fog: false })));
 			}
-			// mountains
-			const snow = dusk ? null : M.mat(0xe8f2fc, { roughness: 1 });
+			// mountains: displaced, faceted peaks with rock strata and snow by height
 			for (let i = -2; i < W / 230 + 3; i++) {
 				const x = i * 230 + hash(i, 4) * 120;
 				const h = 240 + hash(i, 5) * 200;
 				const r = 230 + hash(i, 6) * 120;
 				const z = -620 - hash(i, 7) * 260;
-				const peakMesh = new THREE.Mesh(new THREE.ConeGeometry(r, h, 5), M.mat(i % 2 ? th.mountains[0] : th.mountains[1], { roughness: 1, flat: true }));
-				peakMesh.position.set(x, baseY + h / 2 - 10, z);
+				const peakMesh = new THREE.Mesh(mountainGeometry(r, h, i, i % 2 ? th.mountains[0] : th.mountains[1], dusk ? null : 0xeef4fb), MOUNTAIN_MAT());
+				peakMesh.position.set(x, baseY - 10, z);
 				peakMesh.rotation.y = hash(i, 8) * 1.2;
 				peakMesh.userData.ownGeometry = true;
 				add(peakMesh);
-				if (snow) {
-					const cap = new THREE.Mesh(new THREE.ConeGeometry(r * 0.32, h * 0.3, 5), snow);
-					cap.position.set(x, baseY + h - h * 0.15 - 10, z);
-					cap.rotation.y = peakMesh.rotation.y;
-					cap.userData.ownGeometry = true;
-					add(cap);
-				}
 			}
-			// hills, two rows
+			// hills, two rows, with mottled grass and darker bases
 			for (const [ z, color, rMin, rVar, sy, step ] of [ [ -380, th.hills[0], 170, 90, 0.42, 300 ], [ -190, th.hills[1], 110, 60, 0.5, 210 ] ]) {
 				for (let i = -2; i < W / step + 3; i++) {
 					const r = rMin + hash(i, 9 + z) * rVar;
-					const hillMesh = new THREE.Mesh(new THREE.SphereGeometry(r, 18, 12), M.mat(color, { roughness: 1 }));
-					hillMesh.scale.set(1, sy, 0.6);
+					const hillMesh = new THREE.Mesh(hillGeometry(color, i + z), HILL_MAT());
+					hillMesh.scale.set(r, r * sy, r * 0.6);
 					hillMesh.position.set(i * step + hash(i, 10 + z) * 100, baseY - 4, z);
 					hillMesh.userData.ownGeometry = true;
 					hillMesh.receiveShadow = true;
@@ -518,7 +650,9 @@ export class Renderer3D {
 	}
 
 	buildTiles(theme, room, tiles) {
-		const th = THEMES[theme] || THEMES.overworld;
+		// The 2D palette's cave blue reads as plastic once lit; in 3D the cave is
+		// wet slate with a cold tint instead.
+		const th = theme === "underground" ? { ...THEMES.underground, ground: [ "#3a4862", "#56688a", "#1b2334" ] } : (THEMES[theme] || THEMES.overworld);
 		const g = this.tileGroup;
 		const W = room.w;
 		const cats = {};
@@ -606,9 +740,9 @@ export class Renderer3D {
 			grassTop: { geo: deepGeo, z: -14, tex: th.grass ? Textures.grassBlock(th) : Textures.dirtBlock(th) },
 			groundTop: { geo: deepGeo, z: -14, tex: Textures.dirtBlock(th) },
 			ground: { geo: deepGeo, z: -14, tex: Textures.dirtBlock(th) },
-			castle: { geo: deepGeo, z: -14, tex: Textures.castle() },
-			brick: { geo: blockGeo, z: 0, tex: Textures.brick(th) },
-			question: { geo: blockGeo, z: 0, tex: Textures.question(), emissive: 0xf2c14e, emissiveIntensity: 0.18 },
+			castle: { geo: deepGeo, z: -14, tex: Textures.castle(), bump: 0.7 },
+			brick: { geo: blockGeo, z: 0, tex: Textures.brick(th), bump: 0.7 },
+			question: { geo: blockGeo, z: 0, tex: Textures.question(), emissive: 0xf2c14e, emissiveIntensity: 0.14, rough: 0.42, bump: 0.25 },
 			used: { geo: blockGeo, z: 0, tex: Textures.used() },
 			hard: { geo: blockGeo, z: 0, tex: Textures.hard(th) },
 			gate: { geo: atlasBox(16, 16, 8), z: -2, tex: Textures.gate() },
@@ -627,7 +761,17 @@ export class Renderer3D {
 			if (def.lava) {
 				material = this.lavaMaterial = this.lavaMaterial || new THREE.MeshStandardMaterial({ map: Textures.lava(), emissive: 0xff6a24, emissiveMap: Textures.lava(), emissiveIntensity: 1.1, roughness: 0.6 });
 			} else if (def.tex) {
-				material = new THREE.MeshStandardMaterial({ map: def.tex, roughness: 0.85, emissive: def.emissive || 0x000000, emissiveIntensity: def.emissiveIntensity || 0 });
+				material = new THREE.MeshStandardMaterial({
+					map: def.tex,
+					bumpMap: def.tex.userData.bump || null,
+					bumpScale: def.bump ?? 0.45,
+					roughness: def.rough ?? 0.92,
+					// Ground tops are seen at a grazing angle, where a bright sky
+					// reflection washes them out; keep the sky fill subtle there.
+					envMapIntensity: def.geo === deepGeo ? 0.45 : 0.8,
+					emissive: def.emissive || 0x000000,
+					emissiveIntensity: def.emissiveIntensity || 0,
+				});
 				if (cat === "question") {
 					this.questionMaterial = material;
 				}
@@ -695,7 +839,7 @@ export class Renderer3D {
 
 	drawWorld(game) {
 		const world = game.world;
-		this.tick++;
+		this.tick += this.tickStep ?? 1;
 		const ctx = this.ctx;
 		if (!world) {
 			this.drawScene("overworld", this.tick * 0.5, 12 * TILE);
@@ -747,7 +891,9 @@ export class Renderer3D {
 		this.endPools();
 		this.fx.prevFrame = s.frame;
 
-		this.gl.render(this.scene, this.camera);
+		if (!this.contextLost) {
+			this.gl.render(this.scene, this.camera);
+		}
 
 		// overlay: score popups, vignette, flash
 		ctx.clearRect(0, 0, VIEW_W, VIEW_H);
@@ -1185,7 +1331,7 @@ export class Renderer3D {
 	// --- showcase scene for the title, level select and cards -----------------
 
 	drawScene(theme, camX, roomPixelH) {
-		this.tick++;
+		this.tick += this.tickStep ?? 1;
 		const idx = THEME_LEVEL[theme] ?? 0;
 		const level = this.levels[idx];
 		const room = level.rooms.main;
@@ -1232,7 +1378,9 @@ export class Renderer3D {
 		}
 		this.drawLavaGlow(cx - VIEW_W / 2, -cy - VIEW_H / 2);
 		this.endPools();
-		this.gl.render(this.scene, this.camera);
+		if (!this.contextLost) {
+			this.gl.render(this.scene, this.camera);
+		}
 		this.ctx.clearRect(0, 0, VIEW_W, VIEW_H);
 	}
 }

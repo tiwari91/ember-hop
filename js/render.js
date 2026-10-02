@@ -146,7 +146,7 @@ export class Renderer {
 	drawWorld(game) {
 		const ctx = this.ctx;
 		const world = game.world;
-		this.tick++;
+		this.tick += this.tickStep ?? 1;
 		if (!world) {
 			this.drawScene("overworld", this.tick * 0.4, 12 * TILE);
 			return;

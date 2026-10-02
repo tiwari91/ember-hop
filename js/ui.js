@@ -46,7 +46,7 @@ export class UI {
 
 	draw(game) {
 		const st = game.state;
-		this.tick++;
+		this.tick += this.tickStep ?? 1;
 		if (this.r.is3d) {
 			this.ctx.clearRect(0, 0, VIEW_W, VIEW_H);
 		}

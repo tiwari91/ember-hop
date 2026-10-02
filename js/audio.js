@@ -80,8 +80,12 @@ export class Audio {
 	// Must be called from a user gesture before anything can play.
 	unlock() {
 		if (this.ctx) {
-			if (this.ctx.state === "suspended") {
-				this.ctx.resume();
+			// iOS parks the context as "interrupted" after a call or a trip to the home screen.
+			if (this.ctx.state !== "running" && this.ctx.state !== "closed") {
+				const r = this.ctx.resume();
+				if (r && r.catch) {
+					r.catch(() => {});
+				}
 			}
 			return;
 		}

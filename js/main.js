@@ -71,7 +71,9 @@ input.onAny = () => {
 	audio.unlock();
 	hold = false;
 };
-window.addEventListener("pointerdown", () => audio.unlock(), { passive: true });
+for (const type of [ "pointerdown", "touchend", "click", "keydown" ]) {
+	window.addEventListener(type, () => audio.unlock(), { passive: true });
+}
 
 // Integer scaling keeps pixels crisp on desktops. On phones an integer scale
 // often drops to 1x and wastes most of the screen, so fill the space instead.
@@ -82,14 +84,28 @@ function safeInsets() {
 	return { t: read("--sat"), r: read("--sar"), b: read("--sab"), l: read("--sal") };
 }
 
-function resize() {
+// The size to lay out against. The visual viewport tracks Safari's toolbars,
+// but it also shrinks while the page is pinch-zoomed, so fall back to the
+// layout viewport then instead of shrinking the game with the zoom.
+function viewportSize() {
 	const vv = window.visualViewport;
-	const vw = vv ? vv.width : window.innerWidth;
-	const vh = vv ? vv.height : window.innerHeight;
-	const ins = safeInsets();
+	const de = document.documentElement;
+	if (vv && Math.abs((vv.scale || 1) - 1) < 0.01) {
+		return { vw: vv.width, vh: vv.height };
+	}
+	return { vw: de.clientWidth || window.innerWidth, vh: de.clientHeight || window.innerHeight };
+}
+
+let layoutKey = "";
+function resize() {
+	const { vw, vh } = viewportSize();
+	if (!(vw > 0 && vh > 0)) {
+		return;
+	}
 	const touch = document.body.classList.contains("touch");
 	const portrait = touch && vh > vw;
 	document.body.classList.toggle("portrait", portrait);
+	const ins = safeInsets();
 
 	let availW = vw - ins.l - ins.r;
 	let availH = vh - ins.t - ins.b;
@@ -107,28 +123,99 @@ function resize() {
 	}
 	const w = Math.floor(VIEW_W * scale);
 	const h = Math.floor(VIEW_H * scale);
-	canvas.style.width = `${w}px`;
-	canvas.style.height = `${h}px`;
-	glCanvas.style.width = `${w}px`;
-	glCanvas.style.height = `${h}px`;
+	const key = `${w}x${h}@${window.devicePixelRatio || 1}`;
+	if (key !== layoutKey) {
+		layoutKey = key;
+		canvas.style.width = `${w}px`;
+		canvas.style.height = `${h}px`;
+		glCanvas.style.width = `${w}px`;
+		glCanvas.style.height = `${h}px`;
+	}
 	if (renderer3d) {
 		renderer3d.resize(w, h);
 	}
 }
-if (window.visualViewport) {
-	window.visualViewport.addEventListener("resize", resize);
+
+// iOS reports the new size late after a rotation or toolbar change, and not
+// always through the same event, so coalesce every signal into one re-measure
+// per frame and check again once the animation has settled.
+let resizeQueued = false;
+function queueResize() {
+	if (resizeQueued) {
+		return;
+	}
+	resizeQueued = true;
+	requestAnimationFrame(() => {
+		resizeQueued = false;
+		resize();
+	});
 }
-window.addEventListener("orientationchange", () => setTimeout(resize, 250));
-window.addEventListener("resize", resize);
+function settleResize() {
+	queueResize();
+	for (const ms of [ 120, 350, 700 ]) {
+		setTimeout(queueResize, ms);
+	}
+}
+if (window.visualViewport) {
+	window.visualViewport.addEventListener("resize", queueResize);
+}
+window.addEventListener("resize", queueResize);
+window.addEventListener("orientationchange", settleResize);
+if (screen.orientation && screen.orientation.addEventListener) {
+	screen.orientation.addEventListener("change", settleResize);
+}
+if (typeof ResizeObserver === "function") {
+	new ResizeObserver(queueResize).observe(document.getElementById("stage"));
+}
 resize();
 
+// Pinch and double-tap zoom: iOS ignores user-scalable=no, so stop the gestures.
+for (const type of [ "gesturestart", "gesturechange" ]) {
+	document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+}
+document.addEventListener("touchmove", (e) => {
+	if (e.touches.length > 1 || (e.scale !== undefined && e.scale !== 1)) {
+		e.preventDefault();
+	}
+}, { passive: false });
+let lastTouchEnd = 0;
+document.addEventListener("touchend", (e) => {
+	const now = Date.now();
+	if (now - lastTouchEnd < 350) {
+		e.preventDefault();
+	}
+	lastTouchEnd = now;
+	audio.unlock();
+}, { passive: false });
+
+// Coming back to the page: after a tab switch, or a restore from the
+// back/forward cache, re-measure and restart the loop clock so the simulation
+// does not try to catch up on the time spent away. Audio resumes on the next
+// touch (iOS only allows that from a gesture).
+function wake() {
+	last = performance.now();
+	acc = 0;
+	settleResize();
+	kickLoop();
+}
+
 document.addEventListener("visibilitychange", () => {
-	if (document.hidden && game.state.screen === "play") {
-		game.state.menu = 0;
-		game.setScreen("pause");
-		audio.stopMusic();
+	if (document.hidden) {
+		if (game.state.screen === "play") {
+			game.state.menu = 0;
+			game.setScreen("pause");
+			audio.stopMusic();
+		}
+	} else {
+		wake();
 	}
 });
+window.addEventListener("pageshow", (e) => {
+	if (e.persisted) {
+		wake();
+	}
+});
+window.addEventListener("focus", wake);
 
 function save() {
 	writeSave(game.saveData());
@@ -223,13 +310,100 @@ function recordFrame(ms, now) {
 	lastFrameAt = now;
 }
 
+// Render interpolation. The simulation advances in fixed 60 Hz steps, but the
+// display refreshes on its own clock: a frame can land just before or just
+// after a step, so drawing the latest state as-is alternates between 0 and 2
+// steps per frame and reads as judder. Instead every moving body remembers
+// where it was before the last step and is drawn part of the way between the
+// two states, by how far the clock has run into the next step.
+const prevPos = new WeakMap();
+const TELEPORT = 40;
+
+function remember(o) {
+	let p = prevPos.get(o);
+	if (!p) {
+		p = { x: 0, y: 0, step: -1 };
+		prevPos.set(o, p);
+	}
+	p.x = o.x;
+	p.y = o.y;
+	p.step = stepCount;
+}
+
+function rememberList(list) {
+	for (let i = 0; i < list.length; i++) {
+		remember(list[i]);
+	}
+}
+
+function rememberWorld() {
+	const s = game.state.screen === "play" ? game.state.world : null;
+	if (!s) {
+		return;
+	}
+	remember(s.camera);
+	remember(s.player);
+	rememberList(s.enemies);
+	rememberList(s.items);
+	rememberList(s.particles);
+}
+
+const blended = [];
+function blend(o, alpha) {
+	const p = prevPos.get(o);
+	if (!p || p.step !== stepCount - 1) {
+		return;
+	}
+	const dx = o.x - p.x;
+	const dy = o.y - p.y;
+	if (Math.abs(dx) > TELEPORT || Math.abs(dy) > TELEPORT || (dx === 0 && dy === 0)) {
+		return;
+	}
+	blended.push(o, o.x, o.y);
+	o.x = p.x + dx * alpha;
+	o.y = p.y + dy * alpha;
+}
+
+function blendWorld(alpha) {
+	const s = game.state.screen === "play" ? game.state.world : null;
+	if (!s || alpha >= 1) {
+		return;
+	}
+	blend(s.camera, alpha);
+	blend(s.player, alpha);
+	for (const list of [ s.enemies, s.items, s.particles ]) {
+		for (let i = 0; i < list.length; i++) {
+			blend(list[i], alpha);
+		}
+	}
+}
+
+function unblendWorld() {
+	for (let i = 0; i < blended.length; i += 3) {
+		blended[i].x = blended[i + 1];
+		blended[i].y = blended[i + 2];
+	}
+	blended.length = 0;
+}
+
+let stepCount = 0;
 let last = performance.now();
 let acc = 0;
+let rafId = 0;
+let tickAcc = 0;
+let lastTick = performance.now();
 function frame(now) {
-	requestAnimationFrame(frame);
-	acc += Math.min(250, now - last);
+	rafId = requestAnimationFrame(frame);
+	lastTick = performance.now();
+	let dt = Math.min(250, Math.max(0, now - last));
 	last = now;
+	// Snap near-vsync intervals to exactly one step so a 60 Hz display steps once per frame.
+	if (Math.abs(dt - STEP) < 0.6) {
+		dt = STEP;
+	}
+	acc += dt;
 	let steps = 0;
+	let alpha = 1;
 	if (replay.queue) {
 		// Fast-forward through recorded inputs (used by tests/check.mjs).
 		hitStop = 0;
@@ -269,6 +443,8 @@ function frame(now) {
 		}
 	} else {
 		while (acc >= STEP && steps < MAX_STEPS) {
+			rememberWorld();
+			stepCount++;
 			stepOnce(input.snapshot());
 			acc -= STEP;
 			steps++;
@@ -279,12 +455,65 @@ function frame(now) {
 		if (steps === MAX_STEPS) {
 			acc = 0;
 		}
+		alpha = hitStop > 0 ? 1 : Math.min(1, acc / STEP);
 	}
+	watchContext(now);
+	// Presentation clocks (run cycles, flicker, drifting clouds) count 60 Hz
+	// ticks of display time, so they keep their speed at 30 Hz (Low Power
+	// Mode) or 120 Hz instead of following the frame rate.
+	tickAcc += dt;
+	const ticks = Math.min(4, Math.floor(tickAcc / STEP));
+	tickAcc -= ticks * STEP;
+	if (tickAcc > STEP) {
+		tickAcc = 0;
+	}
+	ui.tickStep = ticks;
+	ui.r.tickStep = ticks;
 	const t0 = performance.now();
-	ui.draw(game);
+	blendWorld(alpha);
+	try {
+		ui.draw(game);
+	} finally {
+		unblendWorld();
+	}
 	recordFrame(performance.now() - t0, t0);
 }
-requestAnimationFrame(frame);
+
+// If the WebGL context is lost and not given back within a few seconds, draw
+// with the 2D painter until it returns, rather than showing a frozen frame.
+let lostSince = 0;
+function watchContext(now) {
+	if (!renderer3d) {
+		return;
+	}
+	if (renderer3d.contextLost) {
+		lostSince = lostSince || now;
+		if (ui.r === renderer3d && now - lostSince > 2500) {
+			ui.r = renderer2d;
+			ui.ctx = renderer2d.ctx;
+			document.body.classList.remove("view3d");
+			glCanvas.hidden = true;
+		}
+	} else if (lostSince) {
+		lostSince = 0;
+		applyView();
+	}
+}
+
+// Start the loop, or restart it if the browser stopped delivering frames
+// (seen on iOS after a restore from the back/forward cache).
+function kickLoop() {
+	cancelAnimationFrame(rafId);
+	last = performance.now();
+	acc = 0;
+	rafId = requestAnimationFrame(frame);
+}
+kickLoop();
+setInterval(() => {
+	if (!document.hidden && performance.now() - lastTick > 1000) {
+		kickLoop();
+	}
+}, 1000);
 
 // Debug / test hooks.
 let hookPrev = EMPTY_INPUT;

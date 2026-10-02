@@ -92,7 +92,7 @@ Heart Leaf 1 life, goal pole 100 to 5000 by height, time bonus 50 per tick.
 
 | Action | Keyboard | Gamepad | Touch |
 |--------|----------|---------|-------|
-| Move / menus | Arrow keys or A / D (up/down in menus) | left stick, d-pad | d-pad |
+| Move / menus | Arrow keys or A / D (up/down in menus) | left stick, d-pad | d-pad (slide between buttons) |
 | Jump / confirm | Z or Space (Enter also confirms) | A (bottom face) | A |
 | Run / throw spark | X or Shift | X (left face) or right trigger | B |
 | Crouch / enter pipe | Down or S | d-pad down | d-pad down |
@@ -101,7 +101,9 @@ Heart Leaf 1 life, goal pole 100 to 5000 by height, time bonus 50 per tick.
 
 ## Presentation
 
-The simulation runs at a fixed 60 Hz and never touches the DOM. Two renderers draw it:
+The simulation runs at a fixed 60 Hz and never touches the DOM. Each displayed frame draws
+moving bodies interpolated between the last two simulation steps, so motion stays smooth
+whatever the display's refresh rate. Two renderers draw it:
 
 - **3D (default)**, `js/render3d/`. Every tile is an instanced, bevel-textured block; pipes are
   cylinders; coins spin; lava is emissive and animated. Per-theme lighting (hemisphere + shadowed
@@ -110,7 +112,10 @@ The simulation runs at a fixed 60 Hz and never touches the DOM. Two renderers dr
   torches and crystals, additive glow sprites, dust on landing and skids, drifting leaves,
   fireflies, cave drips, embers and ash. Ember, the enemies and the items are procedural models
   with animation (run cycle, jump and fall poses, flowing dupatta, blinking, squash and stretch).
-  Instancing keeps draw calls low; the shadow map is 1024 and the pixel ratio is capped at 2.
+  Block textures carry fractal grain and matching bump maps, a small prefiltered sky dome adds
+  image-based light per theme, and mountains are noise-displaced with rock strata and snow.
+  Instancing keeps draw calls low; the shadow map is 1024 and the pixel ratio is capped at 2
+  (and at about 2 M backing pixels).
 - **2D classic**, `js/render.js` + `js/sprites.js`. Layered parallax, pixel art with a 5x7 font,
   lighting overlays for the dark themes, vignette, shadows and particles.
 
